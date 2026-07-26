@@ -93,6 +93,15 @@ export class HumanIdentity {
     };
   }
 
+  copy(): HumanIdentity {
+    return new HumanIdentity(
+      this.identityId,
+      this.lifecycleStatus,
+      this.createdAt,
+      this.updatedAt,
+    );
+  }
+
   private transitionTo(status: HumanIdentityStatus, clock: Clock): void {
     const now = clock.now();
     this.lifecycleStatus = status;

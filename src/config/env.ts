@@ -10,6 +10,14 @@ const environmentSchema = z.object({
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
+  PASSWORD_HASH_MEMORY_KIB: z.coerce.number().int().min(8192).default(19_456),
+  PASSWORD_HASH_ITERATIONS: z.coerce.number().int().min(2).default(2),
+  PASSWORD_HASH_PARALLELISM: z.coerce.number().int().min(1).default(1),
+  SESSION_DURATION_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .default(86_400),
 });
 
 export type Config = z.infer<typeof environmentSchema>;
