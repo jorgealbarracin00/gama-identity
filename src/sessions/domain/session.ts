@@ -6,6 +6,15 @@ import { SessionId } from "./session-id.js";
 
 export type SessionStatus = "active" | "expired" | "revoked";
 
+export interface SessionSnapshot {
+  readonly id: SessionId;
+  readonly humanIdentityId: HumanIdentityId;
+  readonly createdAt: Date;
+  readonly lastAccessedAt: Date;
+  readonly expiresAt: Date;
+  readonly status: SessionStatus;
+}
+
 export class Session {
   private constructor(
     private readonly sessionId: SessionId,
@@ -33,6 +42,17 @@ export class Session {
       new Date(now),
       new Date(now.getTime() + durationSeconds * 1000),
       "active",
+    );
+  }
+
+  static reconstitute(snapshot: SessionSnapshot): Session {
+    return new Session(
+      snapshot.id,
+      snapshot.humanIdentityId,
+      new Date(snapshot.createdAt),
+      new Date(snapshot.lastAccessedAt),
+      new Date(snapshot.expiresAt),
+      snapshot.status,
     );
   }
 
@@ -82,5 +102,16 @@ export class Session {
       this.expiresAt,
       this.lifecycleStatus,
     );
+  }
+
+  snapshot(): SessionSnapshot {
+    return {
+      id: this.sessionId,
+      humanIdentityId: this.ownerId,
+      createdAt: this.createdAt,
+      lastAccessedAt: this.lastAccessedAt,
+      expiresAt: this.expiresAt,
+      status: this.lifecycleStatus,
+    };
   }
 }

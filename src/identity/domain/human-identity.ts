@@ -36,6 +36,15 @@ export class HumanIdentity {
     );
   }
 
+  static reconstitute(snapshot: HumanIdentitySnapshot): HumanIdentity {
+    return new HumanIdentity(
+      snapshot.id,
+      snapshot.status,
+      new Date(snapshot.createdAt),
+      new Date(snapshot.updatedAt),
+    );
+  }
+
   get id(): HumanIdentityId {
     return this.identityId;
   }

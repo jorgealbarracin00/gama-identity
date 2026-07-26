@@ -15,6 +15,16 @@ import type { PasswordVerifier } from "../ports/password-operations.js";
 
 export type EmailCredentialStatus = "active" | "disabled" | "retired";
 
+export interface EmailCredentialSnapshot {
+  readonly id: EmailCredentialId;
+  readonly humanIdentityId: HumanIdentityId;
+  readonly email: NormalizedEmail;
+  readonly passwordHash: PasswordHash;
+  readonly status: EmailCredentialStatus;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+}
+
 export class EmailCredential {
   private constructor(
     private readonly credentialId: EmailCredentialId,
@@ -43,6 +53,18 @@ export class EmailCredential {
       "active",
       new Date(now.getTime()),
       new Date(now.getTime()),
+    );
+  }
+
+  static reconstitute(snapshot: EmailCredentialSnapshot): EmailCredential {
+    return new EmailCredential(
+      snapshot.id,
+      snapshot.humanIdentityId,
+      snapshot.email,
+      snapshot.passwordHash,
+      snapshot.status,
+      new Date(snapshot.createdAt),
+      new Date(snapshot.updatedAt),
     );
   }
 
@@ -142,6 +164,18 @@ export class EmailCredential {
       this.createdAt,
       this.updatedAt,
     );
+  }
+
+  snapshotForPersistence(): EmailCredentialSnapshot {
+    return {
+      id: this.credentialId,
+      humanIdentityId: this.ownerId,
+      email: this.normalizedEmail,
+      passwordHash: this.passwordDigest,
+      status: this.lifecycleStatus,
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
+    };
   }
 
   private transitionTo(status: EmailCredentialStatus, clock: Clock): void {

@@ -94,9 +94,30 @@ describe("operational identity HTTP API", () => {
       const response: InjectResponse = await app.inject({ method: "GET", url });
       assert.equal(response.statusCode, 200);
       assert.equal(response.json().status, "running");
+      assert.equal(response.json().database.status, "not_configured");
     }
     const missing = await app.inject({ method: "GET", url: "/session" });
     assert.equal(missing.statusCode, 401);
     assert.equal(missing.json().error.code, "SESSION_INVALID");
+  });
+
+  it("returns degraded health without leaking database errors", async () => {
+    const { services } = buildTestServices();
+    app = buildApp(services, {
+      async check(): Promise<"connected"> {
+        throw new Error(
+          "postgresql://user:secret-password@private-host/database",
+        );
+      },
+    });
+    const response = await app.inject({ method: "GET", url: "/health" });
+    assert.equal(response.statusCode, 503);
+    assert.deepEqual(response.json(), {
+      service: "gama-identity",
+      version: "1.1.0",
+      status: "degraded",
+      database: { status: "unavailable" },
+    });
+    assert.doesNotMatch(response.body, /secret-password|private-host/);
   });
 });

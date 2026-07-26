@@ -18,6 +18,20 @@ const environmentSchema = z.object({
     .int()
     .min(60)
     .default(86_400),
+  REPOSITORY_MODE: z.enum(["memory", "postgres"]).default("memory"),
+  DATABASE_URL: z.string().url().optional(),
+  DATABASE_SSL: z.enum(["disable", "require"]).default("disable"),
+}).superRefine((environment, context) => {
+  if (
+    environment.REPOSITORY_MODE === "postgres" &&
+    environment.DATABASE_URL === undefined
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["DATABASE_URL"],
+      message: "DATABASE_URL is required when REPOSITORY_MODE is postgres",
+    });
+  }
 });
 
 export type Config = z.infer<typeof environmentSchema>;
