@@ -33,6 +33,9 @@ import {
   UuidSessionIdGenerator,
 } from "../shared/identifiers.js";
 import { logger } from "../shared/logger.js";
+import { ControlPlane } from "../control-plane/application/control-plane.js";
+import { InMemoryControlPlaneRepository } from "../control-plane/adapters/in-memory-control-plane-repository.js";
+import { PostgresControlPlaneRepository } from "../infrastructure/postgres/postgres-control-plane-repository.js";
 
 export interface IdentityServices {
   readonly register: {
@@ -41,6 +44,7 @@ export interface IdentityServices {
   readonly login: Login;
   readonly logout: Logout;
   readonly validateSession: ValidateSession;
+  readonly controlPlane: ControlPlane;
 }
 
 export interface DatabaseHealth {
@@ -50,6 +54,7 @@ export interface DatabaseHealth {
 export interface ApplicationRuntime {
   readonly services: IdentityServices;
   readonly databaseHealth: DatabaseHealth;
+  readonly controlPlane: ControlPlane;
   close(): Promise<void>;
 }
 
@@ -94,11 +99,19 @@ export async function buildRuntime(
       sessions,
     ),
   );
+  const controlPlane = new ControlPlane(
+    new PostgresControlPlaneRepository(database),
+    identities,
+    createPasswordOperations(runtimeConfig),
+    new SystemClock(),
+    (work) => database.withTransaction(work),
+  );
 
   return {
     services: {
       ...services,
       register: new TransactionalRegister(services.register, database),
+      controlPlane,
     },
     databaseHealth: {
       async check() {
@@ -106,6 +119,7 @@ export async function buildRuntime(
         return "connected";
       },
     },
+    controlPlane,
     close: () => database.close(),
   };
 }
@@ -127,14 +141,21 @@ function buildMemoryRuntime(runtimeConfig: Config = config): ApplicationRuntime 
     ),
     clock,
   );
+  const controlPlane = new ControlPlane(
+    new InMemoryControlPlaneRepository(),
+    identities,
+    createPasswordOperations(runtimeConfig),
+    clock,
+  );
 
   return {
-    services,
+    services: { ...services, controlPlane },
     databaseHealth: {
       async check() {
         return "not_configured";
       },
     },
+    controlPlane,
     async close() {},
   };
 }
@@ -152,11 +173,7 @@ function composeServices(
   logout: Logout;
   validateSession: ValidateSession;
 } {
-  const passwordOperations = new Argon2PasswordOperations({
-    memoryCost: runtimeConfig.PASSWORD_HASH_MEMORY_KIB,
-    timeCost: runtimeConfig.PASSWORD_HASH_ITERATIONS,
-    parallelism: runtimeConfig.PASSWORD_HASH_PARALLELISM,
-  });
+  const passwordOperations = createPasswordOperations(runtimeConfig);
 
   const createIdentity = new CreateHumanIdentity(
     identities,
@@ -194,4 +211,12 @@ function composeServices(
     logout: new Logout(sessions),
     validateSession: new ValidateSession(sessions, clock),
   };
+}
+
+function createPasswordOperations(runtimeConfig: Config): Argon2PasswordOperations {
+  return new Argon2PasswordOperations({
+    memoryCost: runtimeConfig.PASSWORD_HASH_MEMORY_KIB,
+    timeCost: runtimeConfig.PASSWORD_HASH_ITERATIONS,
+    parallelism: runtimeConfig.PASSWORD_HASH_PARALLELISM,
+  });
 }

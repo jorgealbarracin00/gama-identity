@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit --project tsconfig.test.json",
     "test": "tsx --test \"test/**/*.test.ts\"",
     "test:integration": "tsx --test \"test/integration/**/*.test.ts\"",
-    "migrate": "tsx src/infrastructure/postgres/migrate-cli.ts"
+    "migrate": "tsx src/infrastructure/postgres/migrate-cli.ts",
+    "bootstrap:coco": "tsx src/control-plane/bootstrap-coco.ts"
   },
   "repository": {
     "type": "git",

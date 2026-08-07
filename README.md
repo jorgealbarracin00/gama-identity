@@ -1,8 +1,9 @@
 # gama-identity
 
-`gama-identity` is the operational identity service for the GAMA Platform. An
-independent product can register a human, authenticate with email and password,
-receive and validate a session, and log out. PostgreSQL is the production
+`gama-identity` is the initial single-runtime GAMA Platform control plane. It
+provides Human Identity, authentication, sessions, and the minimum Product,
+Tenant, workforce-entitlement and Product Workload control-plane capabilities.
+It does not contain Product business-domain logic. PostgreSQL is the production
 persistence implementation; deterministic in-memory adapters remain available
 for tests and lightweight development.
 
@@ -12,6 +13,8 @@ The service keeps four boundaries independent:
 
 ```text
 Human Identity → Email Credential → Authentication Result → Session
+                                                   ↓
+                         Product / Tenant / Workload Control Plane
 ```
 
 - **Human Identity** owns only the stable principal ID and its lifecycle.
@@ -24,6 +27,10 @@ Human Identity → Email Credential → Authentication Result → Session
 - **Registration and login** are orchestration use cases that coordinate these
   boundaries without exposing their aggregates.
 - **HTTP** parses requests and translates results and errors only.
+- **Control Plane** owns registered Products, Tenants, workforce membership,
+  Product Participation, Product Entitlement, Product Workloads and
+  Platform-security bootstrap audit. Product roles and business authorization
+  remain Product-owned.
 
 Ports isolate all repositories, password operations, time, and ID generation.
 The composition root selects in-memory or PostgreSQL infrastructure without
@@ -48,6 +55,12 @@ The relational schema preserves aggregate boundaries:
   password hash, credential lifecycle, and timestamps.
 - `sessions` stores the owning identity reference, lifecycle, access time, and
   fixed expiry.
+- `registered_products`, `tenants`, `tenant_memberships`,
+  `product_participations` and `product_entitlements` store the minimum
+  workforce control plane.
+- `product_workloads` stores a Product Workload identity and only a protected
+  workload-secret hash.
+- `platform_audit_events` stores Platform-security and administrative events.
 - `schema_migrations` records applied migration versions and checksums.
 
 A partial unique index permits only one non-retired credential to claim a
@@ -125,6 +138,21 @@ return `401` with an explicit session error code.
 ### `POST /logout`
 
 Revokes the bearer session and returns `204`. Repeated logout is successful.
+
+### `GET /control/workforce-context`
+
+Requires a valid Human bearer session plus `tenantId` and `productId` query
+parameters. It succeeds only when the authenticated Human has active Tenant
+Membership, Product Participation and Product Entitlement for the requested
+workforce context. A `403 WORKFORCE_CONTEXT_REQUIRED` response does not revoke
+or otherwise invalidate the Human's GAMA authentication.
+
+### `GET /control/workload-context`
+
+Requires `x-gama-workload-id` and `x-gama-workload-secret` request headers.
+It authenticates an active Product Workload and returns its stable workload and
+Product identifiers. It is the minimum server-to-server identity validation
+contract for a future Product backend. It never grants Product-domain authority.
 
 ### `GET /health`
 
@@ -210,6 +238,10 @@ Configuration is validated with Zod at startup and fails fast when invalid.
 | `DATABASE_URL` | — | Required in PostgreSQL mode |
 | `DATABASE_SSL` | `disable` | `disable` or `require` |
 
+The following inputs are used only by the operator-only Coco bootstrap command
+and have no defaults: `COCO_OWNER_HUMAN_IDENTITY_ID`, `COCO_WORKLOAD_SECRET`,
+and `COCO_BOOTSTRAP_ACTOR_REFERENCE`.
+
 Memory mode loses accounts and sessions when the process restarts. PostgreSQL
 mode fails startup if `DATABASE_URL` is absent, the connection cannot be
 established, or migrations fail.
@@ -229,6 +261,27 @@ established, or migrations fail.
 The service continues to bind to `0.0.0.0` and Railway's `PORT`. Startup checks
 the database and applies pending migrations before accepting traffic.
 
+## Coco development bootstrap
+
+After an active owner Human Identity has been created in the PostgreSQL-backed
+GAMA runtime, an operator establishes the Phase 1 Coco control plane using:
+
+```bash
+REPOSITORY_MODE=postgres \
+COCO_OWNER_HUMAN_IDENTITY_ID=<active-human-identity-id> \
+COCO_WORKLOAD_SECRET=<new-secret-of-at-least-24-characters> \
+COCO_BOOTSTRAP_ACTOR_REFERENCE=<platform-operator-reference> \
+npm run bootstrap:coco
+```
+
+The bootstrap is transactional and creates or refreshes the stable records
+`coco-the-llama`, `coco-backend`, and `coco-development`, together with the
+owner's workforce relationships. It records Product registration, workload
+identity establishment, Tenant Membership, Product Participation and Product
+Entitlement in Platform audit. The workload secret is stored only as a hash and
+must be placed into the future Coco backend's secret configuration manually.
+Customers are never created as Tenant members by this command.
+
 ## Security decisions
 
 - Passwords use a mature Argon2id implementation behind the existing port.
@@ -241,6 +294,10 @@ the database and applies pending migrations before accepting traffic.
 - Repository reads return copies so callers cannot mutate persisted state
   outside repository operations.
 - All SQL uses parameterized values.
+- Product Workload secrets are hashed and are required explicitly; network
+  location and Product identity alone do not authenticate a workload.
+- The public runtime exposes no bootstrap endpoint and contains no Coco
+  authorization bypass.
 - Database URLs and connection errors are not returned by health endpoints.
 
 ## Release process

@@ -15,6 +15,8 @@ import { CreateSession, Logout, ValidateSession } from "../../src/sessions/appli
 import { InMemoryRegistrationCompensator } from "../../src/operations/adapters/in-memory-registration-compensator.js";
 import { Login, Register } from "../../src/operations/application/use-cases.js";
 import type { IdentityServices } from "../../src/api/services.js";
+import { ControlPlane } from "../../src/control-plane/application/control-plane.js";
+import { InMemoryControlPlaneRepository } from "../../src/control-plane/adapters/in-memory-control-plane-repository.js";
 
 export class MutableClock implements Clock {
   constructor(private value: Date) {}
@@ -67,6 +69,7 @@ export function buildTestServices(): {
   identities: InMemoryHumanIdentityRepository;
   credentials: InMemoryEmailCredentialRepository;
   sessions: InMemorySessionRepository;
+  controlPlaneRepository: InMemoryControlPlaneRepository;
 } {
   const clock = new MutableClock(new Date("2026-01-01T00:00:00Z"));
   const identities = new InMemoryHumanIdentityRepository();
@@ -96,6 +99,13 @@ export function buildTestServices(): {
     clock,
     3600,
   );
+  const controlPlaneRepository = new InMemoryControlPlaneRepository();
+  const controlPlane = new ControlPlane(
+    controlPlaneRepository,
+    identities,
+    passwords,
+    clock,
+  );
   const services = {
     register: new Register(
       createIdentity,
@@ -111,6 +121,7 @@ export function buildTestServices(): {
     login: new Login(authenticate, createSession),
     logout: new Logout(sessions),
     validateSession: new ValidateSession(sessions, clock),
+    controlPlane,
   };
-  return { services, clock, identities, credentials, sessions };
+  return { services, clock, identities, credentials, sessions, controlPlaneRepository };
 }

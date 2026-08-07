@@ -5,7 +5,7 @@ import { logger } from "./shared/logger.js";
 
 try {
   const runtime = await buildRuntime(config);
-  const app = buildApp(runtime.services, runtime.databaseHealth);
+  const app = buildApp(runtime.services, runtime.databaseHealth, runtime.controlPlane);
   app.addHook("onClose", async () => runtime.close());
 
   const shutdown = async () => {
