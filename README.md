@@ -12,14 +12,18 @@ for tests and lightweight development.
 The service keeps four boundaries independent:
 
 ```text
-Human Identity → Email Credential → Authentication Result → Session
-                                                   ↓
-                         Product / Tenant / Workload Control Plane
+Human Identity ─┬→ Email Credential ───────┐
+                └→ Federated Identity ─────┴→ Authentication Result → Session
+                                                                      ↓
+                                            Product / Tenant / Workload Control Plane
 ```
 
 - **Human Identity** owns only the stable principal ID and its lifecycle.
 - **Email Credential** belongs to a Human Identity and owns normalized email,
   protected password material, and credential lifecycle.
+- **Federated Identity** belongs to a Human Identity and is uniquely identified
+  by provider plus verified provider subject. Optional provider email is metadata,
+  never identity or password authority.
 - **Authentication** is an application service. It does not create identities
   or sessions.
 - **Session** owns authenticated continuity and its own lifecycle. It does not
@@ -28,9 +32,9 @@ Human Identity → Email Credential → Authentication Result → Session
   boundaries without exposing their aggregates.
 - **HTTP** parses requests and translates results and errors only.
 - **Control Plane** owns registered Products, Tenants, workforce membership,
-  Product Participation, Product Entitlement, Product Workloads and
-  Platform-security bootstrap audit. Product roles and business authorization
-  remain Product-owned.
+  canonical Tenant Workforce Role assignment, Product Participation, Product
+  Entitlement, Product Workloads and Platform-security audit. Products remain
+  responsible for mapping validated Tenant roles to Product-specific capabilities.
 
 Ports isolate all repositories, password operations, time, and ID generation.
 The composition root selects in-memory or PostgreSQL infrastructure without
@@ -53,11 +57,16 @@ The relational schema preserves aggregate boundaries:
 - `human_identities` stores Human Identity lifecycle state and timestamps.
 - `credentials` stores the owning identity reference, normalized email,
   password hash, credential lifecycle, and timestamps.
+- `federated_identities` stores provider-neutral authentication relationships;
+  `federated_authentication_nonces` stores only consumed nonce hashes for replay
+  protection.
 - `sessions` stores the owning identity reference, lifecycle, access time, and
   fixed expiry.
 - `registered_products`, `tenants`, `tenant_memberships`,
   `product_participations` and `product_entitlements` store the minimum
   workforce control plane.
+- `tenant_provisioning_requests` binds administrative request UUIDs to one
+  stable Tenant and initial Owner, making ambiguous retries safe.
 - `product_workloads` stores a Product Workload identity and only a protected
   workload-secret hash.
 - `platform_audit_events` stores Platform-security and administrative events.
@@ -82,6 +91,13 @@ email, credential, or identity exists.
 
 Passwords are hashed in production with Argon2id. Tests use deterministic
 password doubles and never weaken the production adapter.
+
+Sign in with Apple is the first federated provider. GAMA verifies Apple's signed
+identity token, issuer, configured audience, expiration and nonce against Apple's
+rotating public keys, then resolves `(provider, providerSubject)`. Unknown Apple
+subjects create a new canonical Human transactionally; matching email never
+silently links an existing account. See
+[`docs/FEDERATED_AUTHENTICATION.md`](docs/FEDERATED_AUTHENTICATION.md).
 
 ## Session flow
 
@@ -129,6 +145,13 @@ runs in one database transaction. Any failure rolls back every write.
 Accepts the same request shape. Returns `200` with session metadata, or `401`
 with the uniform `INVALID_CREDENTIALS` error.
 
+### `POST /authentication/federated/apple`
+
+Accepts only an Apple identity token and its raw one-time nonce. The server
+cryptographically verifies Apple and returns the same ordinary opaque GAMA
+session contract. It does not accept a subject, email, Human Identity ID, or any
+authorization relationship from the caller.
+
 ### `GET /session`
 
 Validates the bearer session and touches its last-access time. Returns `200`
@@ -146,6 +169,93 @@ parameters. It succeeds only when the authenticated Human has active Tenant
 Membership, Product Participation and Product Entitlement for the requested
 workforce context. A `403 WORKFORCE_CONTEXT_REQUIRED` response does not revoke
 or otherwise invalidate the Human's GAMA authentication.
+
+A successful context includes `membershipStatus` and the canonical `tenantRole`
+(`owner`, `admin` or `staff`) read from the server-owned Tenant Membership.
+Existing consumers may ignore these additive fields. Products decide what the
+validated role permits for Product-owned capabilities.
+
+## Workforce administration boundaries
+
+`WorkforceAdministration` is the authoritative application service for Human
+lookup, Tenant workforce listing, Product workforce grants, Tenant role changes,
+Product-only revocation and Tenant membership revocation. A grant is idempotent
+and establishes the independent Tenant Membership, Product Participation and
+Product Entitlement required by workforce context. Role mutation preserves the
+membership key `(tenantId, humanIdentityId)`.
+
+Final-owner demotion and revocation execute in the same PostgreSQL transaction
+as a lock over the Tenant's memberships. Tenant removal suspends that person's
+Tenant Membership and Tenant-scoped Product Entitlements; it does not delete the
+Human Identity, another Tenant relationship or customer data. Security-relevant
+changes append Platform audit events, including role transition data.
+
+`WorkforceAdministration` remains internal business logic. It is callable over
+HTTP only through two explicit authenticated adapters; `actorReference` remains
+audit attribution and is never accepted as authentication.
+
+### Platform administration
+
+A Platform administrator authenticates with an ordinary opaque GAMA Human
+session. The service checks both the active Human Identity and the current
+`platform_administration_memberships` row on every request. The only MVP
+Platform role is the explicitly named `administrator`; Tenant `owner`, `admin`
+and `staff` never imply it. The Platform boundary supports:
+
+- `GET /administration/platform/tenants`
+- `POST /administration/platform/tenants`
+- `GET /administration/platform/products`
+- `GET /administration/platform/tenants/:tenantId/products`
+- `PUT /administration/platform/tenants/:tenantId/products/:productId`
+- `GET /administration/platform/identities/resolve?email=...`
+- `GET /administration/platform/tenants/:tenantId/team`
+- `GET /administration/platform/tenants/:tenantId/team/:humanIdentityId`
+- `POST /administration/platform/tenants/:tenantId/team`
+- `PATCH /administration/platform/tenants/:tenantId/team/:humanIdentityId/role`
+- `DELETE /administration/platform/tenants/:tenantId/team/:humanIdentityId/products/:productId`
+- `DELETE /administration/platform/tenants/:tenantId/team/:humanIdentityId`
+
+Platform administrators have all-Tenant scope in this initial model. Requested
+Tenants and Products are still checked against authoritative GAMA records.
+
+Tenant provisioning requires a client-generated UUID `idempotencyKey`, a
+`displayName`, and an existing active `initialOwnerHumanIdentityId`. GAMA
+generates the opaque Tenant ID and atomically creates the Tenant and canonical
+Owner Membership. An identical retry returns the original resource without a
+duplicate audit event; different input under the same request key is rejected.
+Display name is presentation data and never becomes the stable Tenant key.
+
+The Product directory exposes only ID, display name and lifecycle status. The
+Tenant Product routes project and manage the existing Product Participation,
+which is the Human-independent `(tenantId, productId)` relationship. Team
+projections add safe account email, nullable display name, Human lifecycle,
+Membership role/status and per-Product Participation/Entitlement status. Human
+Identity ID remains authoritative; email remains lookup/display only.
+
+### Tenant Team administration
+
+The Team boundary requires both a Human bearer session and an authenticated
+Product Workload (`x-gama-workload-id` and `x-gama-workload-secret`). The Product
+comes from the authenticated workload. `x-gama-tenant-id` is trusted only as a
+server-to-server context established by the Product backend; it must never be
+copied from a mobile/public client request. GAMA derives the acting Tenant
+Workforce Principal from current Human Identity, Membership, role,
+Participation and Entitlement state.
+
+The Team routes are:
+
+- `GET /administration/team`
+- `POST /administration/team` with only `email` and `tenantRole`
+- `PATCH /administration/team/:humanIdentityId/role`
+- `PUT /administration/team/:humanIdentityId/product-access`
+- `DELETE /administration/team/:humanIdentityId/product-access`
+- `DELETE /administration/team/:humanIdentityId`
+
+No Team request accepts a Tenant ID or Product ID in its public payload. Owner
+may manage Admin and Staff. Admin may add/remove Staff and manage Staff access.
+Staff cannot administer Team. Self-mutation and all Tenant-side Owner creation,
+demotion or removal are rejected; additional Owner and ownership transfer are
+Platform-administration operations for the MVP.
 
 ### `GET /control/workload-context`
 
@@ -212,6 +322,32 @@ opened. They are ordered by numeric filename, recorded with SHA-256 checksums,
 protected by a PostgreSQL advisory lock, and safe to run repeatedly. Never edit
 an applied migration; add a new versioned migration instead.
 
+Migration `003_tenant_workforce_roles.sql` adds constrained Tenant roles,
+membership timestamps and structured audit event data. Existing memberships
+receive `staff`, preserving their workforce eligibility without granting
+ownership. Deploy the migration-capable runtime before any Console integration,
+establish at least one canonical owner through controlled Platform
+administration, verify role-bearing workforce context, and only then allow
+Product backends to rely on `tenantRole`.
+
+Migration `004_administration_principals.sql` adds the distinct, GAMA-owned
+Platform administration membership. Apply migrations before enabling either
+administration adapter. Provisioning the first administrator remains an
+explicit operator action; no login, email, Firebase role or Tenant role can
+bootstrap Platform authority.
+
+Migration `005_platform_tenant_provisioning.sql` adds the durable idempotency
+ledger for atomic Tenant and initial-Owner provisioning. It requires no Product
+backfill: existing `product_participations` already represent the canonical
+Tenant/Product association. Applying this migration to an environment is a
+separate deployment operation.
+
+Migration `006_federated_identities.sql` additively creates the provider-neutral
+FederatedIdentity and consumed-nonce tables. It requires no backfill and changes
+no existing identity, credential, session, workforce, Platform Administration,
+or Coco relationship. Applying it to any environment is a separate deployment
+operation.
+
 PostgreSQL integration tests are isolated from the runtime connection variable:
 
 ```bash
@@ -237,10 +373,15 @@ Configuration is validated with Zod at startup and fails fast when invalid.
 | `REPOSITORY_MODE` | `memory` | `memory` or `postgres` infrastructure |
 | `DATABASE_URL` | — | Required in PostgreSQL mode |
 | `DATABASE_SSL` | `disable` | `disable` or `require` |
+| `APPLE_CLIENT_IDS` | — | Comma-separated public Apple client-ID audience allowlist; Apple exchange fails closed when absent |
 
 The following inputs are used only by the operator-only Coco bootstrap command
 and have no defaults: `COCO_OWNER_HUMAN_IDENTITY_ID`, `COCO_WORKLOAD_SECRET`,
 and `COCO_BOOTSTRAP_ACTOR_REFERENCE`.
+
+`PLATFORM_ADMIN_HUMAN_IDENTITY_ID` and
+`PLATFORM_ADMIN_BOOTSTRAP_ACTOR_REFERENCE` are used only by the explicit
+Platform-administrator bootstrap command described below.
 
 Memory mode loses accounts and sessions when the process restarts. PostgreSQL
 mode fails startup if `DATABASE_URL` is absent, the connection cannot be
@@ -278,9 +419,31 @@ The bootstrap is transactional and creates or refreshes the stable records
 `coco-the-llama`, `coco-backend`, and `coco-development`, together with the
 owner's workforce relationships. It records Product registration, workload
 identity establishment, Tenant Membership, Product Participation and Product
-Entitlement in Platform audit. The workload secret is stored only as a hash and
+Entitlement in Platform audit only when the corresponding state changes;
+repeating the same bootstrap is an audit-clean no-op. The workload secret is
+stored only as a hash and
 must be placed into the future Coco backend's secret configuration manually.
 Customers are never created as Tenant members by this command.
+The explicitly supplied bootstrap owner receives Tenant role `owner`; this does
+not elevate other existing memberships.
+
+## Platform administrator bootstrap
+
+After migration `004` and after the intended administrator already has an
+active GAMA Human Identity, an authorized deployment operator runs:
+
+```bash
+REPOSITORY_MODE=postgres \
+PLATFORM_ADMIN_HUMAN_IDENTITY_ID=<active-human-identity-id> \
+PLATFORM_ADMIN_BOOTSTRAP_ACTOR_REFERENCE=<accountable-operator-reference> \
+npm run bootstrap:platform-admin
+```
+
+The command is transactional, idempotent and audited. It is not an HTTP route,
+does not accept email as authority, does not promote the first login, and does
+not depend on Console Firebase state. Suspension or retirement of the stored
+membership removes Platform authority on the next request even if the Human's
+GAMA session remains active.
 
 ## Security decisions
 
@@ -291,6 +454,10 @@ Customers are never created as Tenant members by this command.
 - Session and entity IDs are cryptographically random UUIDs in production.
 - Request configuration is validated at the boundary; domain rules remain in
   their owning domains.
+- External provider subjects are accepted only from cryptographically verified
+  tokens. Provider email is metadata and never triggers account linking.
+- Federated nonces are verified against the signed token and consumed once; raw
+  nonces and provider tokens are not persisted or deliberately logged.
 - Repository reads return copies so callers cannot mutate persisted state
   outside repository operations.
 - All SQL uses parameterized values.

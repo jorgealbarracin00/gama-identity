@@ -1,4 +1,18 @@
 import { Argon2PasswordOperations } from "../authentication/adapters/argon2-password-operations.js";
+import { AppleIdentityTokenVerifier, APPLE_FEDERATED_PROVIDER } from "../authentication/federated/adapters/apple-identity-token-verifier.js";
+import {
+  InMemoryFederatedAuthenticationNonceRepository,
+  InMemoryFederatedIdentityRepository,
+} from "../authentication/federated/adapters/in-memory-federated-identity-repository.js";
+import { AuthenticateFederated } from "../authentication/federated/application/authenticate-federated.js";
+import {
+  FederatedIdentityTokenVerifiers,
+  UnavailableFederatedIdentityTokenVerifier,
+} from "../authentication/federated/application/token-verifier.js";
+import type {
+  FederatedAuthenticationNonceRepository,
+  FederatedIdentityRepository,
+} from "../authentication/federated/ports/federated-identity-repository.js";
 import { Authenticate } from "../authentication/application/authenticate.js";
 import { InMemoryEmailCredentialRepository } from "../authentication/credentials/adapters/in-memory-email-credential-repository.js";
 import { CreateEmailCredential } from "../authentication/credentials/application/use-cases.js";
@@ -13,6 +27,10 @@ import { PostgresDatabase } from "../infrastructure/postgres/database.js";
 import { runMigrations } from "../infrastructure/postgres/migrations.js";
 import { PostgresHumanIdentityRepository } from "../infrastructure/postgres/postgres-human-identity-repository.js";
 import { PostgresEmailCredentialRepository } from "../infrastructure/postgres/postgres-email-credential-repository.js";
+import {
+  PostgresFederatedAuthenticationNonceRepository,
+  PostgresFederatedIdentityRepository,
+} from "../infrastructure/postgres/postgres-federated-identity-repository.js";
 import { PostgresSessionRepository } from "../infrastructure/postgres/postgres-session-repository.js";
 import { PostgresRegistrationCompensator } from "../infrastructure/postgres/postgres-registration-compensator.js";
 import { TransactionalRegister } from "../infrastructure/postgres/transactional-register.js";
@@ -26,9 +44,10 @@ import {
   Logout,
   ValidateSession,
 } from "../sessions/application/use-cases.js";
-import { SystemClock } from "../shared/clock.js";
+import { SystemClock, type Clock } from "../shared/clock.js";
 import {
   UuidEmailCredentialIdGenerator,
+  UuidFederatedIdentityIdGenerator,
   UuidHumanIdentityIdGenerator,
   UuidSessionIdGenerator,
 } from "../shared/identifiers.js";
@@ -36,15 +55,31 @@ import { logger } from "../shared/logger.js";
 import { ControlPlane } from "../control-plane/application/control-plane.js";
 import { InMemoryControlPlaneRepository } from "../control-plane/adapters/in-memory-control-plane-repository.js";
 import { PostgresControlPlaneRepository } from "../infrastructure/postgres/postgres-control-plane-repository.js";
+import { WorkforceAdministration } from "../control-plane/application/workforce-administration.js";
+import { AdministrationPrincipals } from "../control-plane/application/administration-principals.js";
+import {
+  PlatformAdministration,
+  PlatformAdministrationProvisioning,
+} from "../control-plane/application/platform-administration.js";
+import { TenantTeamAdministration } from "../control-plane/application/tenant-team-administration.js";
+import type { ControlPlaneRepository } from "../control-plane/ports/control-plane-repository.js";
+import { SerialExecutor } from "../shared/serial-executor.js";
+
+export interface AdministrationServices {
+  readonly platform: PlatformAdministration;
+  readonly tenantTeam: TenantTeamAdministration;
+}
 
 export interface IdentityServices {
   readonly register: {
     execute(input: CredentialsInput): Promise<RegistrationResult>;
   };
   readonly login: Login;
+  readonly authenticateFederated: AuthenticateFederated;
   readonly logout: Logout;
   readonly validateSession: ValidateSession;
   readonly controlPlane: ControlPlane;
+  readonly administration: AdministrationServices;
 }
 
 export interface DatabaseHealth {
@@ -55,6 +90,8 @@ export interface ApplicationRuntime {
   readonly services: IdentityServices;
   readonly databaseHealth: DatabaseHealth;
   readonly controlPlane: ControlPlane;
+  readonly workforceAdministration: WorkforceAdministration;
+  readonly platformAdministrationProvisioning: PlatformAdministrationProvisioning;
   close(): Promise<void>;
 }
 
@@ -88,22 +125,52 @@ export async function buildRuntime(
   const identities = new PostgresHumanIdentityRepository(database);
   const credentials = new PostgresEmailCredentialRepository(database);
   const sessions = new PostgresSessionRepository(database);
+  const federatedIdentities = new PostgresFederatedIdentityRepository(database);
+  const federatedNonces = new PostgresFederatedAuthenticationNonceRepository(database);
   const services = composeServices(
     runtimeConfig,
     identities,
     credentials,
     sessions,
+    federatedIdentities,
+    federatedNonces,
     new PostgresRegistrationCompensator(
       identities,
       credentials,
       sessions,
     ),
+    new SystemClock(),
+    (work) => database.withTransaction(work),
   );
+  const controlPlaneRepository = new PostgresControlPlaneRepository(database);
+  const clock = new SystemClock();
   const controlPlane = new ControlPlane(
-    new PostgresControlPlaneRepository(database),
+    controlPlaneRepository,
     identities,
     createPasswordOperations(runtimeConfig),
-    new SystemClock(),
+    clock,
+    (work) => database.withTransaction(work),
+  );
+  const workforceAdministration = new WorkforceAdministration(
+    controlPlaneRepository,
+    identities,
+    credentials,
+    clock,
+    (work) => database.withTransaction(work),
+  );
+  const administration = composeAdministration(
+    controlPlaneRepository,
+    identities,
+    credentials,
+    controlPlane,
+    workforceAdministration,
+    clock,
+    (work) => database.withTransaction(work),
+  );
+  const platformAdministrationProvisioning = new PlatformAdministrationProvisioning(
+    controlPlaneRepository,
+    identities,
+    clock,
     (work) => database.withTransaction(work),
   );
 
@@ -112,6 +179,7 @@ export async function buildRuntime(
       ...services,
       register: new TransactionalRegister(services.register, database),
       controlPlane,
+      administration,
     },
     databaseHealth: {
       async check() {
@@ -120,6 +188,8 @@ export async function buildRuntime(
       },
     },
     controlPlane,
+    workforceAdministration,
+    platformAdministrationProvisioning,
     close: () => database.close(),
   };
 }
@@ -129,34 +199,86 @@ function buildMemoryRuntime(runtimeConfig: Config = config): ApplicationRuntime 
   const identities = new InMemoryHumanIdentityRepository();
   const credentials = new InMemoryEmailCredentialRepository();
   const sessions = new InMemorySessionRepository();
+  const federatedIdentities = new InMemoryFederatedIdentityRepository();
+  const federatedNonces = new InMemoryFederatedAuthenticationNonceRepository();
+  const serial = new SerialExecutor();
   const services = composeServices(
     runtimeConfig,
     identities,
     credentials,
     sessions,
+    federatedIdentities,
+    federatedNonces,
     new InMemoryRegistrationCompensator(
       identities,
       credentials,
       sessions,
     ),
     clock,
+    (work) => serial.execute(work),
   );
+  const controlPlaneRepository = new InMemoryControlPlaneRepository();
   const controlPlane = new ControlPlane(
-    new InMemoryControlPlaneRepository(),
+    controlPlaneRepository,
     identities,
     createPasswordOperations(runtimeConfig),
     clock,
   );
+  const workforceAdministration = new WorkforceAdministration(
+    controlPlaneRepository,
+    identities,
+    credentials,
+    clock,
+  );
+  const administration = composeAdministration(
+    controlPlaneRepository,
+    identities,
+    credentials,
+    controlPlane,
+    workforceAdministration,
+    clock,
+  );
+  const platformAdministrationProvisioning = new PlatformAdministrationProvisioning(
+    controlPlaneRepository,
+    identities,
+    clock,
+  );
 
   return {
-    services: { ...services, controlPlane },
+    services: { ...services, controlPlane, administration },
     databaseHealth: {
       async check() {
         return "not_configured";
       },
     },
     controlPlane,
+    workforceAdministration,
+    platformAdministrationProvisioning,
     async close() {},
+  };
+}
+
+function composeAdministration(
+  repository: ControlPlaneRepository,
+  identities: HumanIdentityRepository,
+  credentials: EmailCredentialRepository,
+  controlPlane: ControlPlane,
+  workforceAdministration: WorkforceAdministration,
+  clock: Clock,
+  atomically: <T>(work: () => Promise<T>) => Promise<T> = async (work) => work(),
+): AdministrationServices {
+  const principals = new AdministrationPrincipals(repository, identities, controlPlane);
+  return {
+    platform: new PlatformAdministration(
+      principals,
+      workforceAdministration,
+      repository,
+      identities,
+      credentials,
+      clock,
+      atomically,
+    ),
+    tenantTeam: new TenantTeamAdministration(principals, workforceAdministration, repository, credentials),
   };
 }
 
@@ -165,11 +287,15 @@ function composeServices(
   identities: HumanIdentityRepository,
   credentials: EmailCredentialRepository,
   sessions: SessionRepository,
+  federatedIdentities: FederatedIdentityRepository,
+  federatedNonces: FederatedAuthenticationNonceRepository,
   compensator: RegistrationCompensator,
   clock = new SystemClock(),
+  atomically: <T>(work: () => Promise<T>) => Promise<T> = async (work) => work(),
 ): {
   register: Register;
   login: Login;
+  authenticateFederated: AuthenticateFederated;
   logout: Logout;
   validateSession: ValidateSession;
 } {
@@ -198,6 +324,20 @@ function composeServices(
     clock,
     runtimeConfig.SESSION_DURATION_SECONDS,
   );
+  const appleVerifier = runtimeConfig.APPLE_CLIENT_IDS.length === 0
+    ? new UnavailableFederatedIdentityTokenVerifier(APPLE_FEDERATED_PROVIDER)
+    : new AppleIdentityTokenVerifier({ clientIds: runtimeConfig.APPLE_CLIENT_IDS });
+  const authenticateFederated = new AuthenticateFederated(
+    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedIdentities,
+    federatedNonces,
+    identities,
+    new UuidHumanIdentityIdGenerator(),
+    new UuidFederatedIdentityIdGenerator(),
+    createSession,
+    clock,
+    atomically,
+  );
 
   return {
     register: new Register(
@@ -208,6 +348,7 @@ function composeServices(
       compensator,
     ),
     login: new Login(authenticate, createSession),
+    authenticateFederated,
     logout: new Logout(sessions),
     validateSession: new ValidateSession(sessions, clock),
   };

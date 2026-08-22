@@ -21,6 +21,15 @@ const environmentSchema = z.object({
   REPOSITORY_MODE: z.enum(["memory", "postgres"]).default("memory"),
   DATABASE_URL: z.string().url().optional(),
   DATABASE_SSL: z.enum(["disable", "require"]).default("disable"),
+  APPLE_CLIENT_IDS: z.string().optional().transform((value, context) => {
+    if (value === undefined) return [];
+    const clientIds = [...new Set(value.split(",").map((entry) => entry.trim()).filter(Boolean))];
+    if (clientIds.length === 0) {
+      context.addIssue({ code: "custom", message: "APPLE_CLIENT_IDS must contain at least one client identifier" });
+      return z.NEVER;
+    }
+    return clientIds;
+  }),
 }).superRefine((environment, context) => {
   if (
     environment.REPOSITORY_MODE === "postgres" &&

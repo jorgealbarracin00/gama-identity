@@ -10,6 +10,7 @@ import {
   COCO_PRODUCT_ID,
   COCO_WORKLOAD_ID,
   type LifecycleStatus,
+  type TenantWorkforceRole,
 } from "../models.js";
 import type { ControlPlaneRepository } from "../ports/control-plane-repository.js";
 
@@ -23,9 +24,12 @@ export interface WorkforceContext {
   readonly humanIdentityId: string;
   readonly tenantId: string;
   readonly productId: string;
+  readonly humanIdentityActive: boolean;
   readonly tenantActive: boolean;
   readonly productActive: boolean;
   readonly membershipActive: boolean;
+  readonly membershipStatus: LifecycleStatus | null;
+  readonly tenantRole: TenantWorkforceRole | null;
   readonly participationActive: boolean;
   readonly entitlementActive: boolean;
   readonly workforceContextSatisfied: boolean;
@@ -64,46 +68,114 @@ export class ControlPlane {
       throw new Error("COCO_OWNER_HUMAN_IDENTITY_ID must identify an active Human Identity");
     }
 
-    await this.repository.saveProduct({ id: COCO_PRODUCT_ID, displayName: "Coco the Llama", status: "active" });
-    await this.repository.saveTenant({ id: COCO_DEVELOPMENT_TENANT_ID, displayName: "Coco Development", status: "active" });
-    await this.repository.saveWorkload({
-      id: COCO_WORKLOAD_ID,
-      productId: COCO_PRODUCT_ID,
-      secretHash: (await this.passwords.hash(input.workloadSecret)).value,
-      status: "active",
-    });
-    await this.repository.saveMembership({ tenantId: COCO_DEVELOPMENT_TENANT_ID, humanIdentityId: input.ownerHumanIdentityId, status: "active" });
-    await this.repository.saveParticipation({ tenantId: COCO_DEVELOPMENT_TENANT_ID, productId: COCO_PRODUCT_ID, status: "active" });
-    await this.repository.saveEntitlement({ tenantId: COCO_DEVELOPMENT_TENANT_ID, productId: COCO_PRODUCT_ID, humanIdentityId: input.ownerHumanIdentityId, status: "active" });
+    const existingTenant = await this.repository.findTenant(COCO_DEVELOPMENT_TENANT_ID);
+    if (existingTenant?.displayName !== "Coco Development" || existingTenant.status !== "active") {
+      await this.repository.saveTenant({ id: COCO_DEVELOPMENT_TENANT_ID, displayName: "Coco Development", status: "active" });
+    }
+    // This stable row serializes repeated bootstrap invocations before any
+    // audit-producing state is inspected or changed.
+    await this.repository.lockTenant(COCO_DEVELOPMENT_TENANT_ID);
 
-    for (const [eventType, subjectReference] of [
-      ["product.registered", COCO_PRODUCT_ID],
-      ["workload.identity.established", COCO_WORKLOAD_ID],
-      ["tenant.membership.granted", `${COCO_DEVELOPMENT_TENANT_ID}:${input.ownerHumanIdentityId}`],
-      ["product.participation.established", `${COCO_DEVELOPMENT_TENANT_ID}:${COCO_PRODUCT_ID}`],
-      ["product.entitlement.granted", `${COCO_DEVELOPMENT_TENANT_ID}:${COCO_PRODUCT_ID}:${input.ownerHumanIdentityId}`],
-    ] as const) {
-      await this.repository.appendAudit({
-        id: randomUUID(), eventType, actorReference: input.actorReference, subjectReference,
-        productId: COCO_PRODUCT_ID, tenantId: COCO_DEVELOPMENT_TENANT_ID, occurredAt: this.clock.now(),
+    const [existingProduct, existingWorkload, existingMembership, existingParticipation, existingEntitlement] = await Promise.all([
+      this.repository.findProduct(COCO_PRODUCT_ID),
+      this.repository.findWorkload(COCO_WORKLOAD_ID),
+      this.repository.findMembership(COCO_DEVELOPMENT_TENANT_ID, input.ownerHumanIdentityId),
+      this.repository.findParticipation(COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID),
+      this.repository.findEntitlement(COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID, input.ownerHumanIdentityId),
+    ]);
+
+    if (existingProduct?.displayName !== "Coco the Llama" || existingProduct.status !== "active") {
+      await this.repository.saveProduct({ id: COCO_PRODUCT_ID, displayName: "Coco the Llama", status: "active" });
+      await this.auditBootstrap("product.registered", COCO_PRODUCT_ID, input.actorReference);
+    }
+
+    let workloadUnchanged = false;
+    if (
+      existingWorkload !== null
+      && existingWorkload.productId === COCO_PRODUCT_ID
+      && existingWorkload.status === "active"
+    ) {
+      try {
+        workloadUnchanged = await this.passwords.verify(input.workloadSecret, PasswordHash.from(existingWorkload.secretHash));
+      } catch {
+        workloadUnchanged = false;
+      }
+    }
+    if (!workloadUnchanged) {
+      await this.repository.saveWorkload({
+        id: COCO_WORKLOAD_ID,
+        productId: COCO_PRODUCT_ID,
+        secretHash: (await this.passwords.hash(input.workloadSecret)).value,
+        status: "active",
       });
+      await this.auditBootstrap("workload.identity.established", COCO_WORKLOAD_ID, input.actorReference);
+    }
+
+    const now = this.clock.now();
+    if (existingMembership?.status !== "active" || existingMembership.tenantRole !== "owner") {
+      await this.repository.saveMembership({
+        tenantId: COCO_DEVELOPMENT_TENANT_ID,
+        humanIdentityId: input.ownerHumanIdentityId,
+        status: "active",
+        tenantRole: "owner",
+        createdAt: existingMembership?.createdAt ?? now,
+        updatedAt: now,
+      });
+      await this.auditBootstrap(
+        "tenant.membership.granted",
+        `${COCO_DEVELOPMENT_TENANT_ID}:${input.ownerHumanIdentityId}`,
+        input.actorReference,
+      );
+    }
+
+    if (existingParticipation?.status !== "active") {
+      await this.repository.saveParticipation({ tenantId: COCO_DEVELOPMENT_TENANT_ID, productId: COCO_PRODUCT_ID, status: "active" });
+      await this.auditBootstrap(
+        "product.participation.established",
+        `${COCO_DEVELOPMENT_TENANT_ID}:${COCO_PRODUCT_ID}`,
+        input.actorReference,
+      );
+    }
+
+    if (existingEntitlement?.status !== "active") {
+      await this.repository.saveEntitlement({ tenantId: COCO_DEVELOPMENT_TENANT_ID, productId: COCO_PRODUCT_ID, humanIdentityId: input.ownerHumanIdentityId, status: "active" });
+      await this.auditBootstrap(
+        "product.entitlement.granted",
+        `${COCO_DEVELOPMENT_TENANT_ID}:${COCO_PRODUCT_ID}:${input.ownerHumanIdentityId}`,
+        input.actorReference,
+      );
     }
   }
 
+  private async auditBootstrap(eventType: string, subjectReference: string, actorReference: string): Promise<void> {
+    await this.repository.appendAudit({
+      id: randomUUID(),
+      eventType,
+      actorReference,
+      subjectReference,
+      productId: COCO_PRODUCT_ID,
+      tenantId: COCO_DEVELOPMENT_TENANT_ID,
+      occurredAt: this.clock.now(),
+    });
+  }
+
   async workforceContext(humanIdentityId: string, tenantId: string, productId: string): Promise<WorkforceContext> {
-    const [tenant, product, membership, participation, entitlement] = await Promise.all([
+    const [identity, tenant, product, membership, participation, entitlement] = await Promise.all([
+      this.identities.findById(HumanIdentityId.from(humanIdentityId)),
       this.repository.findTenant(tenantId), this.repository.findProduct(productId),
       this.repository.findMembership(tenantId, humanIdentityId),
       this.repository.findParticipation(tenantId, productId),
       this.repository.findEntitlement(tenantId, productId, humanIdentityId),
     ]);
+    const humanIdentityActive = identity?.status === "active";
     const tenantActive = active(tenant?.status);
     const productActive = active(product?.status);
     const membershipActive = active(membership?.status);
     const participationActive = active(participation?.status);
     const entitlementActive = active(entitlement?.status);
-    return { humanIdentityId, tenantId, productId, tenantActive, productActive, membershipActive, participationActive, entitlementActive,
-      workforceContextSatisfied: tenantActive && productActive && membershipActive && participationActive && entitlementActive };
+    return { humanIdentityId, tenantId, productId, humanIdentityActive, tenantActive, productActive, membershipActive,
+      membershipStatus: membership?.status ?? null, tenantRole: membership?.tenantRole ?? null, participationActive, entitlementActive,
+      workforceContextSatisfied: humanIdentityActive && tenantActive && productActive && membershipActive && participationActive && entitlementActive };
   }
 
   async authenticateWorkload(workloadId: string, secret: string): Promise<AuthenticatedWorkload | null> {

@@ -85,6 +85,19 @@ export class PostgresEmailCredentialRepository
     return toCredential(result.rows[0]);
   }
 
+  async findByHumanIdentityId(
+    humanIdentityId: HumanIdentityId,
+  ): Promise<EmailCredential | null> {
+    const result = await this.database.query<CredentialRow>(
+      `${selectCredential}
+       WHERE human_identity_id = $1 AND status <> 'retired'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [humanIdentityId.value],
+    );
+    return toCredential(result.rows[0]);
+  }
+
   async remove(id: EmailCredentialId): Promise<void> {
     await this.database.query("DELETE FROM credentials WHERE id = $1", [
       id.value,

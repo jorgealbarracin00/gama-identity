@@ -1,4 +1,23 @@
+import { createHash } from "node:crypto";
+
 import type { PasswordHasher, PasswordVerifier } from "../../src/authentication/credentials/ports/password-operations.js";
+import {
+  InMemoryFederatedAuthenticationNonceRepository,
+  InMemoryFederatedIdentityRepository,
+} from "../../src/authentication/federated/adapters/in-memory-federated-identity-repository.js";
+import { AuthenticateFederated } from "../../src/authentication/federated/application/authenticate-federated.js";
+import { FederatedAuthenticationError } from "../../src/authentication/federated/application/errors.js";
+import {
+  FederatedIdentityTokenVerifiers,
+  type FederatedCredentialInput,
+  type FederatedIdentityTokenVerifier,
+  type VerifiedFederatedCredential,
+} from "../../src/authentication/federated/application/token-verifier.js";
+import {
+  FederatedIdentityProvider,
+  FederatedProviderSubject,
+} from "../../src/authentication/federated/domain/federated-identity.js";
+import { FederatedIdentityId, type FederatedIdentityIdGenerator } from "../../src/authentication/federated/domain/federated-identity-id.js";
 import { PasswordHash } from "../../src/authentication/credentials/domain/password.js";
 import type { Clock } from "../../src/shared/clock.js";
 import { HumanIdentityId, type HumanIdentityIdGenerator } from "../../src/identity/domain/human-identity-id.js";
@@ -17,6 +36,14 @@ import { Login, Register } from "../../src/operations/application/use-cases.js";
 import type { IdentityServices } from "../../src/api/services.js";
 import { ControlPlane } from "../../src/control-plane/application/control-plane.js";
 import { InMemoryControlPlaneRepository } from "../../src/control-plane/adapters/in-memory-control-plane-repository.js";
+import { WorkforceAdministration } from "../../src/control-plane/application/workforce-administration.js";
+import { AdministrationPrincipals } from "../../src/control-plane/application/administration-principals.js";
+import {
+  PlatformAdministration,
+  PlatformAdministrationProvisioning,
+} from "../../src/control-plane/application/platform-administration.js";
+import { TenantTeamAdministration } from "../../src/control-plane/application/tenant-team-administration.js";
+import { SerialExecutor } from "../../src/shared/serial-executor.js";
 
 export class MutableClock implements Clock {
   constructor(private value: Date) {}
@@ -48,6 +75,50 @@ export class SessionIds implements SessionIdGenerator {
   }
 }
 
+export class FederatedIdentityIds implements FederatedIdentityIdGenerator {
+  private sequence = 0;
+  next(): FederatedIdentityId {
+    this.sequence += 1;
+    return FederatedIdentityId.from(`federated-${this.sequence}`);
+  }
+}
+
+export class DeterministicAppleVerifier implements FederatedIdentityTokenVerifier {
+  readonly provider = FederatedIdentityProvider.from("apple");
+  private readonly credentials = new Map<string, Omit<VerifiedFederatedCredential, "provider" | "nonceHash">>();
+
+  accept(
+    identityToken: string,
+    input: {
+      readonly subject: string;
+      readonly email?: string | null;
+      readonly emailVerified?: boolean | null;
+      readonly emailPrivate?: boolean | null;
+      readonly expiresAt?: Date;
+    },
+  ): void {
+    this.credentials.set(identityToken, {
+      providerSubject: FederatedProviderSubject.from(input.subject),
+      metadata: {
+        email: input.email ?? null,
+        emailVerified: input.emailVerified ?? null,
+        emailPrivate: input.emailPrivate ?? null,
+      },
+      expiresAt: input.expiresAt ?? new Date("2026-01-01T01:00:00.000Z"),
+    });
+  }
+
+  async verify(input: FederatedCredentialInput): Promise<VerifiedFederatedCredential> {
+    const credential = this.credentials.get(input.identityToken);
+    if (credential === undefined) throw new FederatedAuthenticationError("INVALID_SIGNATURE");
+    return {
+      provider: this.provider,
+      ...credential,
+      nonceHash: createHash("sha256").update(input.nonce).digest("base64url"),
+    };
+  }
+}
+
 export class DeterministicPasswords
   implements PasswordHasher, PasswordVerifier
 {
@@ -69,16 +140,26 @@ export function buildTestServices(): {
   identities: InMemoryHumanIdentityRepository;
   credentials: InMemoryEmailCredentialRepository;
   sessions: InMemorySessionRepository;
+  federatedIdentities: InMemoryFederatedIdentityRepository;
+  federatedNonces: InMemoryFederatedAuthenticationNonceRepository;
+  appleVerifier: DeterministicAppleVerifier;
   controlPlaneRepository: InMemoryControlPlaneRepository;
+  workforceAdministration: WorkforceAdministration;
+  platformAdministrationProvisioning: PlatformAdministrationProvisioning;
 } {
   const clock = new MutableClock(new Date("2026-01-01T00:00:00Z"));
   const identities = new InMemoryHumanIdentityRepository();
   const credentials = new InMemoryEmailCredentialRepository();
   const sessions = new InMemorySessionRepository();
+  const federatedIdentities = new InMemoryFederatedIdentityRepository();
+  const federatedNonces = new InMemoryFederatedAuthenticationNonceRepository();
+  const appleVerifier = new DeterministicAppleVerifier();
+  const serial = new SerialExecutor();
   const passwords = new DeterministicPasswords();
+  const identityIds = new IdentityIds();
   const createIdentity = new CreateHumanIdentity(
     identities,
-    new IdentityIds(),
+    identityIds,
     clock,
   );
   const createCredential = new CreateEmailCredential(
@@ -99,11 +180,48 @@ export function buildTestServices(): {
     clock,
     3600,
   );
+  const authenticateFederated = new AuthenticateFederated(
+    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedIdentities,
+    federatedNonces,
+    identities,
+    identityIds,
+    new FederatedIdentityIds(),
+    createSession,
+    clock,
+    (work) => serial.execute(work),
+  );
   const controlPlaneRepository = new InMemoryControlPlaneRepository();
   const controlPlane = new ControlPlane(
     controlPlaneRepository,
     identities,
     passwords,
+    clock,
+  );
+  const workforceAdministration = new WorkforceAdministration(
+    controlPlaneRepository,
+    identities,
+    credentials,
+    clock,
+  );
+  const principals = new AdministrationPrincipals(controlPlaneRepository, identities, controlPlane);
+  let tenantSequence = 0;
+  const administration = {
+    platform: new PlatformAdministration(
+      principals,
+      workforceAdministration,
+      controlPlaneRepository,
+      identities,
+      credentials,
+      clock,
+      undefined,
+      () => `tenant-${++tenantSequence}`,
+    ),
+    tenantTeam: new TenantTeamAdministration(principals, workforceAdministration, controlPlaneRepository, credentials),
+  };
+  const platformAdministrationProvisioning = new PlatformAdministrationProvisioning(
+    controlPlaneRepository,
+    identities,
     clock,
   );
   const services = {
@@ -119,9 +237,23 @@ export function buildTestServices(): {
       ),
     ),
     login: new Login(authenticate, createSession),
+    authenticateFederated,
     logout: new Logout(sessions),
     validateSession: new ValidateSession(sessions, clock),
     controlPlane,
+    administration,
   };
-  return { services, clock, identities, credentials, sessions, controlPlaneRepository };
+  return {
+    services,
+    clock,
+    identities,
+    credentials,
+    sessions,
+    federatedIdentities,
+    federatedNonces,
+    appleVerifier,
+    controlPlaneRepository,
+    workforceAdministration,
+    platformAdministrationProvisioning,
+  };
 }

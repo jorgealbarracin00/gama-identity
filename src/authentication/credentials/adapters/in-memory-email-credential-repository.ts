@@ -2,6 +2,7 @@ import type { EmailCredential } from "../domain/email-credential.js";
 import type { EmailCredentialId } from "../domain/email-credential-id.js";
 import { EmailAlreadyInUseError } from "../domain/errors.js";
 import type { NormalizedEmail } from "../domain/email.js";
+import type { HumanIdentityId } from "../../../identity/domain/human-identity-id.js";
 import type { EmailCredentialRepository } from "../ports/email-credential-repository.js";
 
 export class InMemoryEmailCredentialRepository
@@ -31,6 +32,20 @@ export class InMemoryEmailCredentialRepository
       if (
         credential.status !== "retired" &&
         credential.email.equals(email)
+      ) {
+        return credential.copy();
+      }
+    }
+    return null;
+  }
+
+  async findByHumanIdentityId(
+    humanIdentityId: HumanIdentityId,
+  ): Promise<EmailCredential | null> {
+    for (const credential of this.credentials.values()) {
+      if (
+        credential.status !== "retired" &&
+        credential.humanIdentityId.equals(humanIdentityId)
       ) {
         return credential.copy();
       }

@@ -20,6 +20,7 @@ describe("control-plane HTTP API", () => {
     const response = await app.inject({ method: "GET", url: `/control/workforce-context?tenantId=${COCO_DEVELOPMENT_TENANT_ID}&productId=${COCO_PRODUCT_ID}`, headers: { authorization: `Bearer ${owner.session.sessionId}` } });
     assert.equal(response.statusCode, 200);
     assert.equal(response.json().workforceContextSatisfied, true);
+    assert.equal(response.json().tenantRole, "owner");
   });
 
   it("rejects a non-member from workforce context while preserving Human authentication", async () => {
@@ -43,5 +44,34 @@ describe("control-plane HTTP API", () => {
     assert.equal(accepted.json().productId, COCO_PRODUCT_ID);
     const rejected = await app.inject({ method: "GET", url: "/control/workload-context", headers: { "x-gama-workload-id": COCO_WORKLOAD_ID, "x-gama-workload-secret": "invalid" } });
     assert.equal(rejected.statusCode, 401);
+  });
+
+  it("does not expose workforce administration without a Platform administrator boundary", async () => {
+    const { services } = buildTestServices();
+    app = buildApp(services);
+    const response = await app.inject({ method: "POST", url: "/control/tenants/coco-development/workforce", payload: {} });
+    assert.equal(response.statusCode, 404);
+  });
+
+  it("returns the server-owned Tenant role and ignores a role asserted by the client", async () => {
+    const fixture = buildTestServices();
+    const owner = await fixture.services.register.execute({ email: "owner@coco.example", password: "correct-password" });
+    const staff = await fixture.services.register.execute({ email: "staff@coco.example", password: "correct-password" });
+    await fixture.services.controlPlane.bootstrapCoco({ ownerHumanIdentityId: owner.humanIdentityId, workloadSecret, actorReference: "platform-operator:test" });
+    await fixture.workforceAdministration.grantProductWorkforceAccess({
+      actorReference: "platform-operator:test",
+      tenantId: COCO_DEVELOPMENT_TENANT_ID,
+      productId: COCO_PRODUCT_ID,
+      humanIdentityId: staff.humanIdentityId,
+      tenantRole: "staff",
+    });
+    app = buildApp(fixture.services);
+    const response = await app.inject({
+      method: "GET",
+      url: `/control/workforce-context?tenantId=${COCO_DEVELOPMENT_TENANT_ID}&productId=${COCO_PRODUCT_ID}&tenantRole=owner`,
+      headers: { authorization: `Bearer ${staff.session.sessionId}` },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().tenantRole, "staff");
   });
 });

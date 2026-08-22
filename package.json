@@ -16,7 +16,8 @@
     "test": "tsx --test \"test/**/*.test.ts\"",
     "test:integration": "tsx --test \"test/integration/**/*.test.ts\"",
     "migrate": "tsx src/infrastructure/postgres/migrate-cli.ts",
-    "bootstrap:coco": "tsx src/control-plane/bootstrap-coco.ts"
+    "bootstrap:coco": "tsx src/control-plane/bootstrap-coco.ts",
+    "bootstrap:platform-admin": "tsx src/control-plane/bootstrap-platform-administrator.ts"
   },
   "repository": {
     "type": "git",
@@ -31,6 +32,7 @@
     "argon2": "^0.44.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.10.0",
+    "jose": "^6.2.9",
     "pg": "^8.22.0",
     "pino": "^10.3.1",
     "zod": "^4.4.3"

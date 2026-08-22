@@ -7,6 +7,7 @@ import {
   COCO_WORKLOAD_ID,
 } from "../../src/control-plane/models.js";
 import { buildTestServices } from "../operational/test-doubles.js";
+import { HumanIdentityId } from "../../src/identity/domain/human-identity-id.js";
 
 const workloadSecret = "coco-development-workload-secret";
 
@@ -34,6 +35,8 @@ describe("Coco minimum control plane", () => {
     const context = await fixture.services.controlPlane.workforceContext(owner.humanIdentityId, COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID);
     assert.equal(context.workforceContextSatisfied, true);
     assert.equal(context.membershipActive, true);
+    assert.equal(context.membershipStatus, "active");
+    assert.equal(context.tenantRole, "owner");
     assert.equal(context.participationActive, true);
     assert.equal(context.entitlementActive, true);
   });
@@ -52,7 +55,20 @@ describe("Coco minimum control plane", () => {
     const context = await fixture.services.controlPlane.workforceContext(nonMember.humanIdentityId, COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID);
     assert.equal(context.workforceContextSatisfied, false);
     assert.equal(context.membershipActive, false);
+    assert.equal(context.tenantRole, null);
     assert.equal(context.entitlementActive, false);
+  });
+
+  it("rejects workforce context immediately when the Human Identity is suspended", async () => {
+    const { fixture, owner } = await bootstrapOwner();
+    const identity = await fixture.identities.findById(HumanIdentityId.from(owner.humanIdentityId));
+    assert.ok(identity);
+    identity.suspend(fixture.clock);
+    await fixture.identities.save(identity);
+    const context = await fixture.services.controlPlane.workforceContext(owner.humanIdentityId, COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID);
+    assert.equal(context.humanIdentityActive, false);
+    assert.equal(context.membershipActive, true);
+    assert.equal(context.workforceContextSatisfied, false);
   });
 
   it("does not add a customer to the Coco Tenant merely because the customer has a Human Identity", async () => {
@@ -64,10 +80,27 @@ describe("Coco minimum control plane", () => {
   });
 
   it("records the required Platform bootstrap audit events", async () => {
-    const { fixture } = await bootstrapOwner();
+    const { fixture, owner } = await bootstrapOwner();
     assert.deepEqual(fixture.controlPlaneRepository.auditEvents.map((event) => event.eventType), [
       "product.registered", "workload.identity.established", "tenant.membership.granted",
       "product.participation.established", "product.entitlement.granted",
     ]);
+
+    const membershipBeforeRetry = await fixture.controlPlaneRepository.findMembership(
+      COCO_DEVELOPMENT_TENANT_ID,
+      owner.humanIdentityId,
+    );
+    fixture.clock.set(new Date("2026-01-01T00:05:00.000Z"));
+    await fixture.services.controlPlane.bootstrapCoco({
+      ownerHumanIdentityId: owner.humanIdentityId,
+      workloadSecret,
+      actorReference: "platform-operator:retry",
+    });
+
+    assert.equal(fixture.controlPlaneRepository.auditEvents.length, 5);
+    assert.deepEqual(
+      await fixture.controlPlaneRepository.findMembership(COCO_DEVELOPMENT_TENANT_ID, owner.humanIdentityId),
+      membershipBeforeRetry,
+    );
   });
 });

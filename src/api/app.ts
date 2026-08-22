@@ -12,6 +12,7 @@ import {
   type DatabaseHealth,
   type IdentityServices,
 } from "./services.js";
+import { administrationRoutes } from "./administration-routes.js";
 
 export function buildApp(
   services: IdentityServices = buildIdentityServices(),
@@ -28,6 +29,7 @@ export function buildApp(
   app.register(healthRoutes(new HealthCheck(databaseHealth)));
   app.register(identityRoutes(services));
   app.register(controlPlaneRoutes(services, controlPlane));
+  app.register(administrationRoutes(services));
 
   return app;
 }

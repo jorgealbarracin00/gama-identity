@@ -6,11 +6,19 @@ import { InvalidLoginError } from "../operations/application/errors.js";
 import type { IdentityServices } from "./services.js";
 import { SessionId } from "../sessions/domain/session-id.js";
 import { AppError } from "../shared/errors.js";
+import { FederatedAuthenticationError } from "../authentication/federated/application/errors.js";
 
 const credentialsSchema = z.object({
   email: z.string(),
   password: z.string(),
 });
+const federatedProviderSchema = z.object({
+  provider: z.string().min(1).max(32),
+});
+const federatedCredentialSchema = z.object({
+  identityToken: z.string().min(1).max(16_384),
+  nonce: z.string().min(32).max(256),
+}).strict();
 
 export function identityRoutes(
   services: IdentityServices,
@@ -43,6 +51,26 @@ export function identityRoutes(
       }
     });
 
+    app.post("/authentication/federated/:provider", async (request, reply) => {
+      const provider = federatedProviderSchema.safeParse(request.params);
+      const credential = federatedCredentialSchema.safeParse(request.body);
+      if (!provider.success || !credential.success) {
+        throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      }
+      try {
+        const result = await services.authenticateFederated.execute({
+          provider: provider.data.provider,
+          ...credential.data,
+        });
+        return reply.send({
+          session: result.session,
+          account: { email: result.providerEmail },
+        });
+      } catch (error) {
+        throw translateFederatedAuthenticationError(error);
+      }
+    });
+
     app.post("/logout", async (request, reply) => {
       const sessionId = bearerSessionId(request);
       await services.logout.execute(sessionId);
@@ -62,6 +90,25 @@ export function identityRoutes(
       return reply.send(result);
     });
   };
+}
+
+function translateFederatedAuthenticationError(error: unknown): Error {
+  if (!(error instanceof FederatedAuthenticationError)) {
+    return error instanceof Error ? error : new Error("Federated authentication failed");
+  }
+  if (error.code === "PROVIDER_UNSUPPORTED") {
+    return new AppError("The federated identity provider is unsupported", "FEDERATED_PROVIDER_UNSUPPORTED", 400);
+  }
+  if (error.code === "VERIFICATION_UNAVAILABLE") {
+    return new AppError("Federated authentication is temporarily unavailable", "FEDERATED_VERIFICATION_UNAVAILABLE", 503);
+  }
+  if (error.code === "IDENTITY_UNAVAILABLE" || error.code === "FEDERATED_IDENTITY_UNAVAILABLE") {
+    return new AppError("Federated authentication is unavailable", "FEDERATED_AUTHENTICATION_UNAVAILABLE", 403);
+  }
+  if (error.code === "FEDERATED_IDENTITY_CONFLICT") {
+    return new AppError("Federated authentication cannot be completed", "FEDERATED_IDENTITY_CONFLICT", 409);
+  }
+  return new AppError("The federated credential was not accepted", "FEDERATED_CREDENTIAL_INVALID", 401);
 }
 
 function parseCredentials(body: unknown): {

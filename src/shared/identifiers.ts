@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import type { FederatedIdentityIdGenerator } from "../authentication/federated/domain/federated-identity-id.js";
+import { FederatedIdentityId } from "../authentication/federated/domain/federated-identity-id.js";
 import type { EmailCredentialIdGenerator } from "../authentication/credentials/domain/email-credential-id.js";
 import { EmailCredentialId } from "../authentication/credentials/domain/email-credential-id.js";
 import type { HumanIdentityIdGenerator } from "../identity/domain/human-identity-id.js";
@@ -26,5 +28,12 @@ export class UuidEmailCredentialIdGenerator
 export class UuidSessionIdGenerator implements SessionIdGenerator {
   next(): SessionId {
     return SessionId.from(randomUUID());
+  }
+}
+
+export class UuidFederatedIdentityIdGenerator
+implements FederatedIdentityIdGenerator {
+  next(): FederatedIdentityId {
+    return FederatedIdentityId.from(randomUUID());
   }
 }

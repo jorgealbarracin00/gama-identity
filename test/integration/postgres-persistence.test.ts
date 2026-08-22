@@ -17,6 +17,26 @@ import { Session } from "../../src/sessions/domain/session.js";
 import { SessionId } from "../../src/sessions/domain/session-id.js";
 import { buildRuntime } from "../../src/api/services.js";
 import { loadConfig } from "../../src/config/env.js";
+import { WorkforceAdministrationError } from "../../src/control-plane/application/workforce-administration.js";
+import { COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID } from "../../src/control-plane/models.js";
+import {
+  PostgresFederatedAuthenticationNonceRepository,
+  PostgresFederatedIdentityRepository,
+} from "../../src/infrastructure/postgres/postgres-federated-identity-repository.js";
+import { AuthenticateFederated } from "../../src/authentication/federated/application/authenticate-federated.js";
+import { FederatedIdentityTokenVerifiers } from "../../src/authentication/federated/application/token-verifier.js";
+import { CreateSession } from "../../src/sessions/application/use-cases.js";
+import {
+  UuidFederatedIdentityIdGenerator,
+  UuidHumanIdentityIdGenerator,
+  UuidSessionIdGenerator,
+} from "../../src/shared/identifiers.js";
+import { SystemClock } from "../../src/shared/clock.js";
+import { DeterministicAppleVerifier } from "../operational/test-doubles.js";
+import {
+  FederatedIdentityProvider,
+  FederatedProviderSubject,
+} from "../../src/authentication/federated/domain/federated-identity.js";
 
 const testDatabaseUrl = process.env.POSTGRES_TEST_DATABASE_URL;
 
@@ -39,7 +59,10 @@ describe(
 
     beforeEach(async () => {
       await database.query(
-        "TRUNCATE sessions, credentials, human_identities CASCADE",
+        `TRUNCATE federated_authentication_nonces, federated_identities, sessions, credentials,
+          platform_audit_events, tenant_provisioning_requests, platform_administration_memberships,
+          product_entitlements, product_participations, tenant_memberships, product_workloads,
+          tenants, registered_products, human_identities CASCADE`,
       );
     });
 
@@ -53,7 +76,7 @@ describe(
       const result = await database.query(
         "SELECT version FROM schema_migrations ORDER BY version",
       );
-      assert.deepEqual(result.rows.map((row) => row.version), ["001"]);
+      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006"]);
     });
 
     it("starts and closes a PostgreSQL runtime after a connectivity check", async () => {
@@ -85,6 +108,10 @@ describe(
             NormalizedEmail.from("Person@example.com"),
           )
         )?.id.value,
+        credential.id.value,
+      );
+      assert.equal(
+        (await credentials.findByHumanIdentityId(identity.id))?.id.value,
         credential.id.value,
       );
       assert.deepEqual(
@@ -152,6 +179,219 @@ describe(
       assert.equal((await sessions.findById(session.id))?.status, "revoked");
       assert.equal(await sessions.findActiveById(session.id), null);
     });
+
+    it("persists provider-neutral identities, unique subjects and consumed nonces", async () => {
+      const verifier = new DeterministicAppleVerifier();
+      verifier.accept("postgres-apple-token", {
+        subject: "postgres-apple-subject",
+        email: "relay@privaterelay.appleid.com",
+        emailVerified: true,
+        emailPrivate: true,
+      });
+      const authentication = postgresFederatedAuthentication(database, verifier);
+      const result = await authentication.execute({
+        provider: "apple",
+        identityToken: "postgres-apple-token",
+        nonce: "postgres_nonce_that_is_at_least_thirty_two_characters",
+      });
+      const relation = await new PostgresFederatedIdentityRepository(database).findByProviderSubject(
+        FederatedIdentityProvider.from("apple"),
+        FederatedProviderSubject.from("postgres-apple-subject"),
+      );
+      assert.equal(relation?.humanIdentityId.value, result.humanIdentityId);
+      assert.equal(relation?.providerEmailPrivate, true);
+      assert.equal((await database.query<{ count: string }>("SELECT count(*)::text AS count FROM federated_authentication_nonces")).rows[0]?.count, "1");
+    });
+
+    it("serializes concurrent first federated sign-ins into one Human", async () => {
+      const verifier = new DeterministicAppleVerifier();
+      verifier.accept("postgres-concurrent-a", { subject: "postgres-concurrent-subject" });
+      verifier.accept("postgres-concurrent-b", { subject: "postgres-concurrent-subject" });
+      const first = postgresFederatedAuthentication(database, verifier);
+      const second = postgresFederatedAuthentication(database, verifier);
+      const results = await Promise.all([
+        first.execute({
+          provider: "apple",
+          identityToken: "postgres-concurrent-a",
+          nonce: "postgres_concurrent_nonce_A_at_least_thirty_two_chars",
+        }),
+        second.execute({
+          provider: "apple",
+          identityToken: "postgres-concurrent-b",
+          nonce: "postgres_concurrent_nonce_B_at_least_thirty_two_chars",
+        }),
+      ]);
+      assert.equal(results[0]?.humanIdentityId, results[1]?.humanIdentityId);
+      assert.deepEqual(results.map((result) => result.created).sort(), [false, true]);
+      const counts = await database.query<{ relationships: string; humans: string; sessions: string }>(
+        `SELECT
+           (SELECT count(*)::text FROM federated_identities) AS relationships,
+           (SELECT count(*)::text FROM human_identities) AS humans,
+           (SELECT count(*)::text FROM sessions) AS sessions`,
+      );
+      assert.deepEqual(counts.rows[0], { relationships: "1", humans: "1", sessions: "2" });
+    });
+
+    it("serializes identical Coco bootstrap retries without duplicate audit events", async () => {
+      const firstRuntime = await buildRuntime(
+        loadConfig({ REPOSITORY_MODE: "postgres", DATABASE_URL: testDatabaseUrl }),
+      );
+      const secondRuntime = await buildRuntime(
+        loadConfig({ REPOSITORY_MODE: "postgres", DATABASE_URL: testDatabaseUrl }),
+      );
+      try {
+        const owner = await firstRuntime.services.register.execute({
+          email: "concurrent-bootstrap-owner@coco.example",
+          password: "correct-password",
+        });
+        const input = {
+          ownerHumanIdentityId: owner.humanIdentityId,
+          workloadSecret: "postgres-concurrent-bootstrap-secret",
+          actorReference: "platform-operator:postgres-test",
+        };
+
+        await Promise.all([
+          firstRuntime.controlPlane.bootstrapCoco(input),
+          secondRuntime.controlPlane.bootstrapCoco(input),
+        ]);
+
+        const auditCount = await database.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM platform_audit_events WHERE tenant_id = $1 AND product_id = $2",
+          [COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID],
+        );
+        assert.equal(auditCount.rows[0]?.count, "5");
+        assert.equal(
+          (await firstRuntime.controlPlane.workforceContext(
+            owner.humanIdentityId,
+            COCO_DEVELOPMENT_TENANT_ID,
+            COCO_PRODUCT_ID,
+          )).workforceContextSatisfied,
+          true,
+        );
+      } finally {
+        await Promise.all([firstRuntime.close(), secondRuntime.close()]);
+      }
+    });
+
+    it("serializes concurrent final-owner mutations", async () => {
+      const runtime = await buildRuntime(
+        loadConfig({ REPOSITORY_MODE: "postgres", DATABASE_URL: testDatabaseUrl }),
+      );
+      try {
+        const first = await runtime.services.register.execute({ email: "first-owner@coco.example", password: "correct-password" });
+        const second = await runtime.services.register.execute({ email: "second-owner@coco.example", password: "correct-password" });
+        await runtime.controlPlane.bootstrapCoco({
+          ownerHumanIdentityId: first.humanIdentityId,
+          workloadSecret: "postgres-test-workload-secret",
+          actorReference: "platform-operator:test",
+        });
+        await runtime.workforceAdministration.grantProductWorkforceAccess({
+          actorReference: "platform-operator:test",
+          tenantId: COCO_DEVELOPMENT_TENANT_ID,
+          productId: COCO_PRODUCT_ID,
+          humanIdentityId: second.humanIdentityId,
+          tenantRole: "owner",
+        });
+
+        const results = await Promise.allSettled([
+          runtime.workforceAdministration.changeTenantRole({
+            actorReference: "platform-operator:test",
+            tenantId: COCO_DEVELOPMENT_TENANT_ID,
+            humanIdentityId: first.humanIdentityId,
+            tenantRole: "staff",
+          }),
+          runtime.workforceAdministration.revokeTenantMembership({
+            actorReference: "platform-operator:test",
+            tenantId: COCO_DEVELOPMENT_TENANT_ID,
+            humanIdentityId: second.humanIdentityId,
+          }),
+        ]);
+        assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+        const rejection = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        assert.ok(rejection?.reason instanceof WorkforceAdministrationError);
+        assert.equal(rejection.reason.code, "LAST_OWNER");
+        const memberships = await runtime.workforceAdministration.listTenantWorkforce(COCO_DEVELOPMENT_TENANT_ID);
+        assert.equal(memberships.filter((membership) => membership.status === "active" && membership.tenantRole === "owner").length, 1);
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("persists and rechecks Platform administrator authority through the runtime boundary", async () => {
+      const runtime = await buildRuntime(
+        loadConfig({ REPOSITORY_MODE: "postgres", DATABASE_URL: testDatabaseUrl }),
+      );
+      try {
+        const administrator = await runtime.services.register.execute({
+          email: "postgres-platform-admin@gama.example",
+          password: "correct-password",
+        });
+        await runtime.platformAdministrationProvisioning.bootstrapAdministrator(
+          administrator.humanIdentityId,
+          "deployment-operator:postgres-test",
+        );
+        assert.deepEqual(await runtime.services.administration.platform.listTenants(administrator.humanIdentityId), []);
+        await database.query(
+          "UPDATE platform_administration_memberships SET status = 'suspended', updated_at = now() WHERE human_identity_id = $1",
+          [administrator.humanIdentityId],
+        );
+        await assert.rejects(
+          () => runtime.services.administration.platform.listTenants(administrator.humanIdentityId),
+          (error: unknown) => (error as { code?: string }).code === "NOT_PLATFORM_ADMIN",
+        );
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("serializes cross-runtime Tenant provisioning retries into one Tenant and one initial Owner", async () => {
+      const firstRuntime = await buildRuntime(
+        loadConfig({ REPOSITORY_MODE: "postgres", DATABASE_URL: testDatabaseUrl }),
+      );
+      const secondRuntime = await buildRuntime(
+        loadConfig({ REPOSITORY_MODE: "postgres", DATABASE_URL: testDatabaseUrl }),
+      );
+      try {
+        const administrator = await firstRuntime.services.register.execute({
+          email: "tenant-provisioning-admin@gama.example",
+          password: "correct-password",
+        });
+        const initialOwner = await firstRuntime.services.register.execute({
+          email: "tenant-provisioning-owner@gama.example",
+          password: "correct-password",
+        });
+        await firstRuntime.platformAdministrationProvisioning.bootstrapAdministrator(
+          administrator.humanIdentityId,
+          "deployment-operator:postgres-test",
+        );
+        const input = {
+          idempotencyKey: "55555555-5555-4555-8555-555555555555",
+          displayName: "Concurrent Retailer",
+          initialOwnerHumanIdentityId: initialOwner.humanIdentityId,
+        };
+        const results = await Promise.all([
+          firstRuntime.services.administration.platform.provisionTenant(administrator.humanIdentityId, input),
+          secondRuntime.services.administration.platform.provisionTenant(administrator.humanIdentityId, input),
+        ]);
+
+        assert.deepEqual(results.map((result) => result.created).sort(), [false, true]);
+        assert.equal(results[0]?.tenant.id, results[1]?.tenant.id);
+        const tenantId = results[0]!.tenant.id;
+        const [requestCount, tenantCount, ownerCount, tenantAuditCount] = await Promise.all([
+          database.query<{ count: string }>("SELECT count(*)::text AS count FROM tenant_provisioning_requests WHERE idempotency_key = $1", [input.idempotencyKey]),
+          database.query<{ count: string }>("SELECT count(*)::text AS count FROM tenants WHERE id = $1", [tenantId]),
+          database.query<{ count: string }>(`SELECT count(*)::text AS count FROM tenant_memberships
+            WHERE tenant_id = $1 AND human_identity_id = $2 AND tenant_role = 'owner' AND status = 'active'`, [tenantId, initialOwner.humanIdentityId]),
+          database.query<{ count: string }>("SELECT count(*)::text AS count FROM platform_audit_events WHERE event_type = 'tenant.created' AND tenant_id = $1", [tenantId]),
+        ]);
+        assert.equal(requestCount.rows[0]?.count, "1");
+        assert.equal(tenantCount.rows[0]?.count, "1");
+        assert.equal(ownerCount.rows[0]?.count, "1");
+        assert.equal(tenantAuditCount.rows[0]?.count, "1");
+      } finally {
+        await Promise.all([firstRuntime.close(), secondRuntime.close()]);
+      }
+    });
   },
 );
 
@@ -192,4 +432,27 @@ function sessionAggregate(humanIdentityId: HumanIdentityId): Session {
     expiresAt: new Date("2026-01-02T00:00:00.000Z"),
     status: "active",
   });
+}
+
+function postgresFederatedAuthentication(
+  database: PostgresDatabase,
+  verifier: DeterministicAppleVerifier,
+): AuthenticateFederated {
+  const clock = new SystemClock();
+  return new AuthenticateFederated(
+    new FederatedIdentityTokenVerifiers([verifier]),
+    new PostgresFederatedIdentityRepository(database),
+    new PostgresFederatedAuthenticationNonceRepository(database),
+    new PostgresHumanIdentityRepository(database),
+    new UuidHumanIdentityIdGenerator(),
+    new UuidFederatedIdentityIdGenerator(),
+    new CreateSession(
+      new PostgresSessionRepository(database),
+      new UuidSessionIdGenerator(),
+      clock,
+      3600,
+    ),
+    clock,
+    (work) => database.withTransaction(work),
+  );
 }

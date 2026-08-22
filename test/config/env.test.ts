@@ -9,6 +9,18 @@ describe("environment configuration", () => {
     assert.equal(config.REPOSITORY_MODE, "memory");
     assert.equal(config.DATABASE_URL, undefined);
     assert.equal(config.DATABASE_SSL, "disable");
+    assert.deepEqual(config.APPLE_CLIENT_IDS, []);
+  });
+
+  it("parses one or more public Apple client identifiers without requiring Apple secrets", () => {
+    const config = loadConfig({
+      APPLE_CLIENT_IDS: "com.gamadynamics.coco, com.gamadynamics.console,com.gamadynamics.coco",
+    });
+    assert.deepEqual(config.APPLE_CLIENT_IDS, [
+      "com.gamadynamics.coco",
+      "com.gamadynamics.console",
+    ]);
+    assert.throws(() => loadConfig({ APPLE_CLIENT_IDS: " , " }), /APPLE_CLIENT_IDS/);
   });
 
   it("accepts a PostgreSQL DATABASE_URL", () => {
