@@ -6,3 +6,4 @@ CREATE TABLE tenant_provisioning_requests (
   initial_owner_human_identity_id text NOT NULL REFERENCES human_identities(id),
   created_at timestamptz NOT NULL
 );
+
