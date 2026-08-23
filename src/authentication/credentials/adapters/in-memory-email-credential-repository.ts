@@ -53,6 +53,14 @@ export class InMemoryEmailCredentialRepository
     return null;
   }
 
+  async listByHumanIdentityId(
+    humanIdentityId: HumanIdentityId,
+  ): Promise<readonly EmailCredential[]> {
+    return [...this.credentials.values()]
+      .filter((credential) => credential.humanIdentityId.equals(humanIdentityId))
+      .map((credential) => credential.copy());
+  }
+
   async remove(id: EmailCredentialId): Promise<void> {
     this.credentials.delete(id.value);
   }

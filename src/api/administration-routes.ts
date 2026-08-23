@@ -14,7 +14,11 @@ const tenantProductPath = tenantPath.extend({ productId: z.string().min(1) });
 const memberPath = tenantPath.extend({ humanIdentityId: z.string().min(1) });
 const productMemberPath = memberPath.extend({ productId: z.string().min(1) });
 const teamMemberPath = z.object({ humanIdentityId: z.string().min(1) });
-const identityLookup = z.object({ email: z.email() }).strict();
+const identityLookup = z.union([
+  z.object({ identifier: z.string().trim().min(1).max(320) }).strict(),
+  z.object({ email: z.email() }).strict(),
+  z.object({ humanIdentityId: z.string().trim().min(1).max(200) }).strict(),
+]);
 const tenantProvisioning = z.object({
   idempotencyKey: z.uuid(),
   displayName: z.string().trim().min(1).max(160),
@@ -26,7 +30,10 @@ const platformGrant = z.object({
   tenantRole: z.string().min(1),
 }).strict();
 const roleChange = z.object({ tenantRole: z.string().min(1) }).strict();
-const addTeamMember = z.object({ email: z.email(), tenantRole: z.string().min(1) }).strict();
+const addTeamMember = z.union([
+  z.object({ identifier: z.string().trim().min(1).max(320), tenantRole: z.string().min(1) }).strict(),
+  z.object({ email: z.email(), tenantRole: z.string().min(1) }).strict(),
+]);
 
 export function administrationRoutes(services: IdentityServices): FastifyPluginAsync {
   return async (app) => {
@@ -65,7 +72,12 @@ export function administrationRoutes(services: IdentityServices): FastifyPluginA
     app.get("/administration/platform/identities/resolve", async (request, reply) => {
       const actor = await authenticatedHumanIdentity(services, request);
       const input = parse(identityLookup, request.query);
-      return reply.send(await administer(() => services.administration.platform.resolveHumanIdentityByEmail(actor, input.email)));
+      const result = "identifier" in input
+        ? services.administration.platform.resolveHumanIdentity(actor, input.identifier)
+        : "email" in input
+          ? services.administration.platform.resolveHumanIdentityByEmail(actor, input.email)
+          : services.administration.platform.resolveHumanIdentityById(actor, input.humanIdentityId);
+      return reply.send(await administer(() => result));
     });
 
     app.get("/administration/platform/tenants/:tenantId/team", async (request, reply) => {
@@ -114,7 +126,8 @@ export function administrationRoutes(services: IdentityServices): FastifyPluginA
     app.post("/administration/team", async (request, reply) => {
       const context = await tenantAdministrationContext(services, request);
       const input = parse(addTeamMember, request.body);
-      return reply.send(await administer(() => services.administration.tenantTeam.addTeamMember(context, input.email, input.tenantRole)));
+      const identifier = "identifier" in input ? input.identifier : input.email;
+      return reply.send(await administer(() => services.administration.tenantTeam.addTeamMember(context, identifier, input.tenantRole)));
     });
 
     app.patch("/administration/team/:humanIdentityId/role", async (request, reply) => {
@@ -209,6 +222,7 @@ function administrationAppError(code: string, message: string): AppError {
     return new AppError(message, code, 404);
   }
   if ([
+    "IDENTITY_AMBIGUOUS",
     "LAST_OWNER",
     "MEMBERSHIP_RETIRED",
     "MEMBERSHIP_INACTIVE",

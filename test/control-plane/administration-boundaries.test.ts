@@ -281,6 +281,7 @@ describe("administration principal boundaries", () => {
       displayName: null,
       email: "Worker@example.com",
       status: "active",
+      signInMethods: ["email_password"],
     });
     await f.services.administration.platform.grantProductWorkforceAccess(f.platformAdministrator.humanIdentityId, {
       tenantId: provisioned.tenant.id,
@@ -298,6 +299,7 @@ describe("administration principal boundaries", () => {
       displayName: null,
       email: "Worker@example.com",
       humanIdentityStatus: "active",
+      signInMethods: ["email_password"],
       status: "active",
       membershipStatus: "active",
       tenantRole: "admin",
@@ -401,6 +403,7 @@ describe("tenant Team administration policy", () => {
     assert.deepEqual(adminTeam.find((member) => member.humanIdentityId === staff.humanIdentityId), {
       humanIdentityId: staff.humanIdentityId,
       email: "staff@coco.example",
+      signInMethods: ["email_password"],
       tenantRole: "staff",
       membershipStatus: "active",
       productParticipationStatus: "active",

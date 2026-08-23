@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { NormalizedEmail } from "../../authentication/credentials/domain/email.js";
 import { InvalidEmailError } from "../../authentication/credentials/domain/errors.js";
 import type { EmailCredentialRepository } from "../../authentication/credentials/ports/email-credential-repository.js";
+import type { FederatedIdentityRepository } from "../../authentication/federated/ports/federated-identity-repository.js";
+import type { HumanIdentity } from "../../identity/domain/human-identity.js";
 import { HumanIdentityId } from "../../identity/domain/human-identity-id.js";
 import type { HumanIdentityRepository } from "../../identity/ports/human-identity-repository.js";
 import type { Clock } from "../../shared/clock.js";
@@ -28,8 +30,10 @@ export class WorkforceAdministrationError extends Error {
 export interface ResolvedHumanIdentity {
   readonly humanIdentityId: string;
   readonly displayName: null;
-  readonly email: string;
+  readonly email: string | null;
   readonly status: LifecycleStatus;
+  /** Safe provider names only; never provider subjects or credentials. */
+  readonly signInMethods: readonly string[];
 }
 
 export interface EstablishInitialTenantOwnerInput {
@@ -97,6 +101,7 @@ export class WorkforceAdministration {
     private readonly repository: ControlPlaneRepository,
     private readonly identities: HumanIdentityRepository,
     private readonly credentials: EmailCredentialRepository,
+    private readonly federatedIdentities: FederatedIdentityRepository,
     private readonly clock: Clock,
     private readonly atomically: AtomicExecutor = async (work) => work(),
   ) {}
@@ -109,19 +114,88 @@ export class WorkforceAdministration {
       if (cause instanceof InvalidEmailError) throw error("INVALID_EMAIL", "A valid email address is required");
       throw cause;
     }
-    const credential = await this.credentials.findByNormalizedEmail(email);
-    if (credential === null || credential.status !== "active") {
+    const [credential, federated] = await Promise.all([
+      this.credentials.findByNormalizedEmail(email),
+      this.federatedIdentities.listActiveByVerifiedProviderEmail(email.value),
+    ]);
+    const candidateIds = new Set<string>();
+    if (credential?.status === "active") candidateIds.add(credential.humanIdentityId.value);
+    for (const relationship of federated) candidateIds.add(relationship.humanIdentityId.value);
+
+    const activeCandidates: HumanIdentity[] = [];
+    for (const humanIdentityId of candidateIds) {
+      const identity = await this.identities.findById(HumanIdentityId.from(humanIdentityId));
+      if (identity?.status === "active") activeCandidates.push(identity);
+    }
+    if (activeCandidates.length === 0) {
       throw error("IDENTITY_NOT_FOUND", "No active Human Identity was found");
     }
-    const identity = await this.identities.findById(credential.humanIdentityId);
-    if (identity === null || identity.status !== "active") {
+    if (activeCandidates.length > 1) {
+      throw error(
+        "IDENTITY_AMBIGUOUS",
+        "More than one active Human Identity exposes this email; use the canonical Human ID",
+      );
+    }
+    return this.projectHumanIdentity(activeCandidates[0]!.id, email.value);
+  }
+
+  async resolveHumanIdentityById(rawHumanIdentityId: string): Promise<ResolvedHumanIdentity> {
+    const value = rawHumanIdentityId.trim();
+    if (value.length === 0) throw error("INVALID_IDENTITY_IDENTIFIER", "A Human ID is required");
+    const humanIdentityId = HumanIdentityId.from(value);
+    const identity = await this.identities.findById(humanIdentityId);
+    if (identity?.status !== "active") {
       throw error("IDENTITY_NOT_FOUND", "No active Human Identity was found");
     }
+    return this.projectHumanIdentity(identity.id);
+  }
+
+  async inspectHumanIdentityById(rawHumanIdentityId: string): Promise<ResolvedHumanIdentity> {
+    const value = rawHumanIdentityId.trim();
+    if (value.length === 0) throw error("INVALID_IDENTITY_IDENTIFIER", "A Human ID is required");
+    const humanIdentityId = HumanIdentityId.from(value);
+    const identity = await this.identities.findById(humanIdentityId);
+    if (identity === null) throw error("IDENTITY_NOT_FOUND", "Human Identity was not found");
+    return this.projectHumanIdentity(identity.id);
+  }
+
+  async resolveHumanIdentity(identifier: string): Promise<ResolvedHumanIdentity> {
+    const value = identifier.trim();
+    if (value.length === 0) {
+      throw error("INVALID_IDENTITY_IDENTIFIER", "An email or Human ID is required");
+    }
+    return value.includes("@")
+      ? this.resolveHumanIdentityByEmail(value)
+      : this.resolveHumanIdentityById(value);
+  }
+
+  private async projectHumanIdentity(
+    humanIdentityId: HumanIdentityId,
+    matchedEmail?: string,
+  ): Promise<ResolvedHumanIdentity> {
+    const identity = await this.identities.findById(humanIdentityId);
+    if (identity === null) throw error("IDENTITY_NOT_FOUND", "Human Identity was not found");
+    const [credentials, federated] = await Promise.all([
+      this.credentials.listByHumanIdentityId(humanIdentityId),
+      this.federatedIdentities.listByHumanIdentityId(humanIdentityId),
+    ]);
+    const activeCredential = credentials.find((credential) => credential.status === "active") ?? null;
+    const activeFederated = federated
+      .filter((relationship) => relationship.status === "active")
+      .sort((left, right) => left.provider.value.localeCompare(right.provider.value));
+    const projectedEmail = matchedEmail
+      ?? activeCredential?.email.value
+      ?? activeFederated.find((relationship) => relationship.providerEmailVerified === true)?.providerEmail
+      ?? null;
     return {
       humanIdentityId: identity.id.value,
       displayName: null,
-      email: email.value,
+      email: projectedEmail,
       status: identity.status,
+      signInMethods: [
+        ...(activeCredential === null ? [] : ["email_password"]),
+        ...activeFederated.map((relationship) => relationship.provider.value),
+      ],
     };
   }
 

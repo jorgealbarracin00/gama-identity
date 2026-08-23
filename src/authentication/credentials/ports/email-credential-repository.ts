@@ -18,4 +18,8 @@ export interface EmailCredentialRepository {
   findByHumanIdentityId(
     humanIdentityId: HumanIdentityId,
   ): Promise<EmailCredential | null>;
+  /** Includes disabled and retired history for authority-safe reconciliation. */
+  listByHumanIdentityId(
+    humanIdentityId: HumanIdentityId,
+  ): Promise<readonly EmailCredential[]>;
 }

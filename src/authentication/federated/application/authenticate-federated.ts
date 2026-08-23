@@ -76,6 +76,11 @@ export class AuthenticateFederated {
     );
     if (!consumed) throw new FederatedAuthenticationError("CREDENTIAL_REPLAYED");
 
+    await this.federatedIdentities.lockProviderSubject(
+      verified.provider,
+      verified.providerSubject,
+    );
+
     const existing = await this.federatedIdentities.findByProviderSubject(
       verified.provider,
       verified.providerSubject,

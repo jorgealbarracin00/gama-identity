@@ -52,8 +52,69 @@ describe("canonical workforce administration", () => {
       displayName: null,
       email: "owner@coco.example",
       status: "active",
+      signInMethods: ["email_password"],
     });
     await assert.rejects(() => f.workforceAdministration.resolveHumanIdentityByEmail("missing@coco.example"), assertCode("IDENTITY_NOT_FOUND"));
+  });
+
+  it("discovers an Apple-only Human by verified provider email or canonical Human ID without merging", async () => {
+    const f = await fixture();
+    f.appleVerifier.accept("apple-directory-token", {
+      subject: "apple-directory-subject",
+      email: "apple-only@privaterelay.appleid.com",
+      emailVerified: true,
+      emailPrivate: true,
+    });
+    const appleOnly = await f.services.authenticateFederated.execute({
+      provider: "apple",
+      identityToken: "apple-directory-token",
+      nonce: "apple_directory_nonce_that_is_long_enough",
+    });
+
+    assert.deepEqual(
+      await f.workforceAdministration.resolveHumanIdentityByEmail("APPLE-ONLY@privaterelay.appleid.com"),
+      {
+        humanIdentityId: appleOnly.humanIdentityId,
+        displayName: null,
+        email: "APPLE-ONLY@privaterelay.appleid.com",
+        status: "active",
+        signInMethods: ["apple"],
+      },
+    );
+    assert.deepEqual(
+      await f.workforceAdministration.resolveHumanIdentityById(appleOnly.humanIdentityId),
+      {
+        humanIdentityId: appleOnly.humanIdentityId,
+        displayName: null,
+        email: "apple-only@privaterelay.appleid.com",
+        status: "active",
+        signInMethods: ["apple"],
+      },
+    );
+  });
+
+  it("fails email discovery safely when credential and federated metadata identify different Humans", async () => {
+    const f = await fixture();
+    const passwordHuman = await register(f, "shared@example.com");
+    f.appleVerifier.accept("ambiguous-apple-token", {
+      subject: "ambiguous-apple-subject",
+      email: "shared@example.com",
+      emailVerified: true,
+    });
+    const appleHuman = await f.services.authenticateFederated.execute({
+      provider: "apple",
+      identityToken: "ambiguous-apple-token",
+      nonce: "ambiguous_apple_nonce_that_is_long_enough",
+    });
+    assert.notEqual(passwordHuman.humanIdentityId, appleHuman.humanIdentityId);
+    await assert.rejects(
+      () => f.workforceAdministration.resolveHumanIdentityByEmail("shared@example.com"),
+      assertCode("IDENTITY_AMBIGUOUS"),
+    );
+    assert.equal(
+      (await f.workforceAdministration.resolveHumanIdentityById(appleHuman.humanIdentityId)).humanIdentityId,
+      appleHuman.humanIdentityId,
+    );
   });
 
   it("grants membership, participation, and entitlement as one idempotent product-access operation", async () => {

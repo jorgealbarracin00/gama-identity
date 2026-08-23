@@ -52,6 +52,7 @@ export class InMemoryControlPlaneRepository implements ControlPlaneRepository {
   async saveMembership(membership: TenantMembership): Promise<void> { this.memberships.set(`${membership.tenantId}:${membership.humanIdentityId}`, membership); }
   async findMembership(tenantId: string, humanIdentityId: string): Promise<TenantMembership | null> { return this.memberships.get(`${tenantId}:${humanIdentityId}`) ?? null; }
   async listMembershipsForTenant(tenantId: string): Promise<readonly TenantMembership[]> { return [...this.memberships.values()].filter((membership) => membership.tenantId === tenantId); }
+  async listMembershipsForHuman(humanIdentityId: string): Promise<readonly TenantMembership[]> { return [...this.memberships.values()].filter((membership) => membership.humanIdentityId === humanIdentityId); }
   async lockMembershipsForTenant(tenantId: string): Promise<readonly TenantMembership[]> { return this.listMembershipsForTenant(tenantId); }
   async saveParticipation(participation: ProductParticipation): Promise<void> { this.participations.set(`${participation.tenantId}:${participation.productId}`, participation); }
   async findParticipation(tenantId: string, productId: string): Promise<ProductParticipation | null> { return this.participations.get(`${tenantId}:${productId}`) ?? null; }
@@ -59,5 +60,6 @@ export class InMemoryControlPlaneRepository implements ControlPlaneRepository {
   async saveEntitlement(entitlement: ProductEntitlement): Promise<void> { this.entitlements.set(`${entitlement.tenantId}:${entitlement.productId}:${entitlement.humanIdentityId}`, entitlement); }
   async findEntitlement(tenantId: string, productId: string, humanIdentityId: string): Promise<ProductEntitlement | null> { return this.entitlements.get(`${tenantId}:${productId}:${humanIdentityId}`) ?? null; }
   async listEntitlementsForHuman(tenantId: string, humanIdentityId: string): Promise<readonly ProductEntitlement[]> { return [...this.entitlements.values()].filter((entitlement) => entitlement.tenantId === tenantId && entitlement.humanIdentityId === humanIdentityId); }
+  async listEntitlementsForHumanAcrossTenants(humanIdentityId: string): Promise<readonly ProductEntitlement[]> { return [...this.entitlements.values()].filter((entitlement) => entitlement.humanIdentityId === humanIdentityId); }
   async appendAudit(event: PlatformAuditEvent): Promise<void> { this.auditEvents.push(event); }
 }

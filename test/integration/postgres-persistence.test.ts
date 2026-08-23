@@ -34,6 +34,7 @@ import {
 import { SystemClock } from "../../src/shared/clock.js";
 import { DeterministicAppleVerifier } from "../operational/test-doubles.js";
 import {
+  FederatedIdentity,
   FederatedIdentityProvider,
   FederatedProviderSubject,
 } from "../../src/authentication/federated/domain/federated-identity.js";
@@ -76,7 +77,7 @@ describe(
       const result = await database.query(
         "SELECT version FROM schema_migrations ORDER BY version",
       );
-      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006"]);
+      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006", "007", "008"]);
     });
 
     it("starts and closes a PostgreSQL runtime after a connectivity check", async () => {
@@ -194,13 +195,57 @@ describe(
         identityToken: "postgres-apple-token",
         nonce: "postgres_nonce_that_is_at_least_thirty_two_characters",
       });
-      const relation = await new PostgresFederatedIdentityRepository(database).findByProviderSubject(
+      const repository = new PostgresFederatedIdentityRepository(database);
+      const relation = await repository.findByProviderSubject(
         FederatedIdentityProvider.from("apple"),
         FederatedProviderSubject.from("postgres-apple-subject"),
       );
       assert.equal(relation?.humanIdentityId.value, result.humanIdentityId);
       assert.equal(relation?.providerEmailPrivate, true);
+      assert.deepEqual(
+        (await repository.listActiveByVerifiedProviderEmail("RELAY@privaterelay.appleid.com"))
+          .map((candidate) => candidate.humanIdentityId.value),
+        [result.humanIdentityId],
+      );
+      assert.deepEqual(await repository.listActiveByVerifiedProviderEmail("missing@example.com"), []);
       assert.equal((await database.query<{ count: string }>("SELECT count(*)::text AS count FROM federated_authentication_nonces")).rows[0]?.count, "1");
+    });
+
+    it("enforces one active relationship per Human and provider while allowing reassignment", async () => {
+      const repository = new PostgresFederatedIdentityRepository(database);
+      const firstHuman = identityAggregate();
+      const secondHuman = HumanIdentity.reconstitute({
+        ...firstHuman.snapshot(),
+        id: HumanIdentityId.from("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+      });
+      await identities.save(firstHuman);
+      await identities.save(secondHuman);
+      const first = FederatedIdentity.create(
+        new UuidFederatedIdentityIdGenerator(),
+        firstHuman.id,
+        FederatedIdentityProvider.from("apple"),
+        FederatedProviderSubject.from("one-active-subject"),
+        { email: null, emailVerified: null, emailPrivate: null },
+        fixedClock,
+      );
+      const conflict = FederatedIdentity.create(
+        new UuidFederatedIdentityIdGenerator(),
+        firstHuman.id,
+        FederatedIdentityProvider.from("apple"),
+        FederatedProviderSubject.from("second-active-subject"),
+        { email: null, emailVerified: null, emailPrivate: null },
+        fixedClock,
+      );
+      await repository.save(first);
+      await assert.rejects(repository.save(conflict), (error: unknown) =>
+        (error as Error).name === "FederatedIdentityHumanProviderConflictError");
+
+      first.reassignTo(secondHuman.id, fixedClock);
+      await repository.save(first);
+      assert.equal((await repository.findByProviderSubject(
+        FederatedIdentityProvider.from("apple"),
+        FederatedProviderSubject.from("one-active-subject"),
+      ))?.humanIdentityId.value, secondHuman.id.value);
     });
 
     it("serializes concurrent first federated sign-ins into one Human", async () => {

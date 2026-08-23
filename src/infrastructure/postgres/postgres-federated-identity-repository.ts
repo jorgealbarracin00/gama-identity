@@ -1,4 +1,7 @@
-import { FederatedIdentitySubjectConflictError } from "../../authentication/federated/application/errors.js";
+import {
+  FederatedIdentityHumanProviderConflictError,
+  FederatedIdentitySubjectConflictError,
+} from "../../authentication/federated/application/errors.js";
 import {
   FederatedIdentity,
   FederatedIdentityProvider,
@@ -44,6 +47,7 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
            status, created_at, updated_at
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (id) DO UPDATE SET
+           human_identity_id = EXCLUDED.human_identity_id,
            provider_email = EXCLUDED.provider_email,
            provider_email_verified = EXCLUDED.provider_email_verified,
            provider_email_private = EXCLUDED.provider_email_private,
@@ -69,6 +73,12 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
         postgresError.constraint === "federated_identities_provider_provider_subject_key"
       ) {
         throw new FederatedIdentitySubjectConflictError();
+      }
+      if (
+        postgresError.code === "23505" &&
+        postgresError.constraint === "federated_identities_active_human_provider_unique"
+      ) {
+        throw new FederatedIdentityHumanProviderConflictError();
       }
       throw error;
     }
@@ -100,6 +110,83 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
       updatedAt: row.updated_at,
     });
   }
+
+
+  async listByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<readonly FederatedIdentity[]> {
+    const result = await this.database.query<FederatedIdentityRow>(
+      `${selectFederatedIdentity}
+       WHERE human_identity_id = $1
+       ORDER BY created_at, id`,
+      [humanIdentityId.value],
+    );
+    return result.rows.map(toFederatedIdentity);
+  }
+
+  async listActiveByVerifiedProviderEmail(email: string): Promise<readonly FederatedIdentity[]> {
+    const result = await this.database.query<FederatedIdentityRow>(
+      `${selectFederatedIdentity}
+       WHERE status = 'active'
+         AND provider_email_verified IS TRUE
+         AND lower(provider_email) = lower($1)
+       ORDER BY created_at, id`,
+      [email],
+    );
+    return result.rows.map(toFederatedIdentity);
+  }
+
+  async findActiveByHumanIdentityAndProvider(
+    humanIdentityId: HumanIdentityId,
+    provider: FederatedIdentityProvider,
+  ): Promise<FederatedIdentity | null> {
+    const result = await this.database.query<FederatedIdentityRow>(
+      `${selectFederatedIdentity}
+       WHERE human_identity_id = $1 AND provider = $2 AND status = 'active'`,
+      [humanIdentityId.value, provider.value],
+    );
+    return result.rows[0] === undefined ? null : toFederatedIdentity(result.rows[0]);
+  }
+
+  async lockProviderSubject(
+    provider: FederatedIdentityProvider,
+    providerSubject: FederatedProviderSubject,
+  ): Promise<void> {
+    await this.database.query(
+      "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+      [`federated-subject:${provider.value}`, providerSubject.value],
+    );
+  }
+
+  async lockHumanProvider(
+    humanIdentityId: HumanIdentityId,
+    provider: FederatedIdentityProvider,
+  ): Promise<void> {
+    await this.database.query(
+      "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+      [`federated-human:${provider.value}`, humanIdentityId.value],
+    );
+  }
+}
+
+const selectFederatedIdentity = `
+  SELECT id, human_identity_id, provider, provider_subject,
+         provider_email, provider_email_verified, provider_email_private,
+         status, created_at, updated_at
+  FROM federated_identities
+`;
+
+function toFederatedIdentity(row: FederatedIdentityRow): FederatedIdentity {
+  return FederatedIdentity.reconstitute({
+    id: FederatedIdentityId.from(row.id),
+    humanIdentityId: HumanIdentityId.from(row.human_identity_id),
+    provider: FederatedIdentityProvider.from(row.provider),
+    providerSubject: FederatedProviderSubject.from(row.provider_subject),
+    providerEmail: row.provider_email,
+    providerEmailVerified: row.provider_email_verified,
+    providerEmailPrivate: row.provider_email_private,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
 }
 
 export class PostgresFederatedAuthenticationNonceRepository

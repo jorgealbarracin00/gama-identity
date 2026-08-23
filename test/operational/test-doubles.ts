@@ -6,6 +6,7 @@ import {
   InMemoryFederatedIdentityRepository,
 } from "../../src/authentication/federated/adapters/in-memory-federated-identity-repository.js";
 import { AuthenticateFederated } from "../../src/authentication/federated/application/authenticate-federated.js";
+import { ManageFederatedAuthenticationMethods } from "../../src/authentication/federated/application/manage-federated-authentication-methods.js";
 import { FederatedAuthenticationError } from "../../src/authentication/federated/application/errors.js";
 import {
   FederatedIdentityTokenVerifiers,
@@ -192,6 +193,18 @@ export function buildTestServices(): {
     (work) => serial.execute(work),
   );
   const controlPlaneRepository = new InMemoryControlPlaneRepository();
+  const federatedAuthenticationMethods = new ManageFederatedAuthenticationMethods(
+    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedIdentities,
+    federatedNonces,
+    identities,
+    credentials,
+    sessions,
+    controlPlaneRepository,
+    new FederatedIdentityIds(),
+    clock,
+    (work) => serial.execute(work),
+  );
   const controlPlane = new ControlPlane(
     controlPlaneRepository,
     identities,
@@ -202,6 +215,7 @@ export function buildTestServices(): {
     controlPlaneRepository,
     identities,
     credentials,
+    federatedIdentities,
     clock,
   );
   const principals = new AdministrationPrincipals(controlPlaneRepository, identities, controlPlane);
@@ -217,7 +231,7 @@ export function buildTestServices(): {
       undefined,
       () => `tenant-${++tenantSequence}`,
     ),
-    tenantTeam: new TenantTeamAdministration(principals, workforceAdministration, controlPlaneRepository, credentials),
+    tenantTeam: new TenantTeamAdministration(principals, workforceAdministration, controlPlaneRepository),
   };
   const platformAdministrationProvisioning = new PlatformAdministrationProvisioning(
     controlPlaneRepository,
@@ -238,6 +252,7 @@ export function buildTestServices(): {
     ),
     login: new Login(authenticate, createSession),
     authenticateFederated,
+    federatedAuthenticationMethods,
     logout: new Logout(sessions),
     validateSession: new ValidateSession(sessions, clock),
     controlPlane,

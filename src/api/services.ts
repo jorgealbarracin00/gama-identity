@@ -5,6 +5,7 @@ import {
   InMemoryFederatedIdentityRepository,
 } from "../authentication/federated/adapters/in-memory-federated-identity-repository.js";
 import { AuthenticateFederated } from "../authentication/federated/application/authenticate-federated.js";
+import { ManageFederatedAuthenticationMethods } from "../authentication/federated/application/manage-federated-authentication-methods.js";
 import {
   FederatedIdentityTokenVerifiers,
   UnavailableFederatedIdentityTokenVerifier,
@@ -76,6 +77,7 @@ export interface IdentityServices {
   };
   readonly login: Login;
   readonly authenticateFederated: AuthenticateFederated;
+  readonly federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   readonly logout: Logout;
   readonly validateSession: ValidateSession;
   readonly controlPlane: ControlPlane;
@@ -127,6 +129,7 @@ export async function buildRuntime(
   const sessions = new PostgresSessionRepository(database);
   const federatedIdentities = new PostgresFederatedIdentityRepository(database);
   const federatedNonces = new PostgresFederatedAuthenticationNonceRepository(database);
+  const controlPlaneRepository = new PostgresControlPlaneRepository(database);
   const services = composeServices(
     runtimeConfig,
     identities,
@@ -134,6 +137,7 @@ export async function buildRuntime(
     sessions,
     federatedIdentities,
     federatedNonces,
+    controlPlaneRepository,
     new PostgresRegistrationCompensator(
       identities,
       credentials,
@@ -142,7 +146,6 @@ export async function buildRuntime(
     new SystemClock(),
     (work) => database.withTransaction(work),
   );
-  const controlPlaneRepository = new PostgresControlPlaneRepository(database);
   const clock = new SystemClock();
   const controlPlane = new ControlPlane(
     controlPlaneRepository,
@@ -155,6 +158,7 @@ export async function buildRuntime(
     controlPlaneRepository,
     identities,
     credentials,
+    federatedIdentities,
     clock,
     (work) => database.withTransaction(work),
   );
@@ -201,6 +205,7 @@ function buildMemoryRuntime(runtimeConfig: Config = config): ApplicationRuntime 
   const sessions = new InMemorySessionRepository();
   const federatedIdentities = new InMemoryFederatedIdentityRepository();
   const federatedNonces = new InMemoryFederatedAuthenticationNonceRepository();
+  const controlPlaneRepository = new InMemoryControlPlaneRepository();
   const serial = new SerialExecutor();
   const services = composeServices(
     runtimeConfig,
@@ -209,6 +214,7 @@ function buildMemoryRuntime(runtimeConfig: Config = config): ApplicationRuntime 
     sessions,
     federatedIdentities,
     federatedNonces,
+    controlPlaneRepository,
     new InMemoryRegistrationCompensator(
       identities,
       credentials,
@@ -217,7 +223,6 @@ function buildMemoryRuntime(runtimeConfig: Config = config): ApplicationRuntime 
     clock,
     (work) => serial.execute(work),
   );
-  const controlPlaneRepository = new InMemoryControlPlaneRepository();
   const controlPlane = new ControlPlane(
     controlPlaneRepository,
     identities,
@@ -228,6 +233,7 @@ function buildMemoryRuntime(runtimeConfig: Config = config): ApplicationRuntime 
     controlPlaneRepository,
     identities,
     credentials,
+    federatedIdentities,
     clock,
   );
   const administration = composeAdministration(
@@ -278,7 +284,7 @@ function composeAdministration(
       clock,
       atomically,
     ),
-    tenantTeam: new TenantTeamAdministration(principals, workforceAdministration, repository, credentials),
+    tenantTeam: new TenantTeamAdministration(principals, workforceAdministration, repository),
   };
 }
 
@@ -289,6 +295,7 @@ function composeServices(
   sessions: SessionRepository,
   federatedIdentities: FederatedIdentityRepository,
   federatedNonces: FederatedAuthenticationNonceRepository,
+  controlPlaneRepository: ControlPlaneRepository,
   compensator: RegistrationCompensator,
   clock = new SystemClock(),
   atomically: <T>(work: () => Promise<T>) => Promise<T> = async (work) => work(),
@@ -296,6 +303,7 @@ function composeServices(
   register: Register;
   login: Login;
   authenticateFederated: AuthenticateFederated;
+  federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   logout: Logout;
   validateSession: ValidateSession;
 } {
@@ -338,6 +346,18 @@ function composeServices(
     clock,
     atomically,
   );
+  const federatedAuthenticationMethods = new ManageFederatedAuthenticationMethods(
+    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedIdentities,
+    federatedNonces,
+    identities,
+    credentials,
+    sessions,
+    controlPlaneRepository,
+    new UuidFederatedIdentityIdGenerator(),
+    clock,
+    atomically,
+  );
 
   return {
     register: new Register(
@@ -349,6 +369,7 @@ function composeServices(
     ),
     login: new Login(authenticate, createSession),
     authenticateFederated,
+    federatedAuthenticationMethods,
     logout: new Logout(sessions),
     validateSession: new ValidateSession(sessions, clock),
   };

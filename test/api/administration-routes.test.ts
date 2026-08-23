@@ -75,6 +75,96 @@ describe("administration HTTP boundaries", () => {
     assert.equal(f.controlPlaneRepository.auditEvents.at(-1)?.eventData?.authorityScope, "platform-administration");
   });
 
+  it("discovers an Apple-only Human safely and grants Team access by the canonical resolved Human", async () => {
+    const f = await fixture();
+    f.appleVerifier.accept("apple-team-token", {
+      subject: "private-apple-team-subject",
+      email: "shared-apple-user@example.com",
+      emailVerified: true,
+      emailPrivate: false,
+    });
+    const appleOnly = await f.services.authenticateFederated.execute({
+      provider: "apple",
+      identityToken: "apple-team-token",
+      nonce: "apple_team_nonce_that_is_at_least_32_chars",
+    });
+    app = buildApp(f.services);
+    const platformHeaders = { authorization: `Bearer ${f.platformAdministrator.session.sessionId}` };
+
+    const byEmail = await app.inject({
+      method: "GET",
+      url: "/administration/platform/identities/resolve?identifier=shared-apple-user%40example.com",
+      headers: platformHeaders,
+    });
+    assert.equal(byEmail.statusCode, 200);
+    assert.deepEqual(byEmail.json(), {
+      humanIdentityId: appleOnly.humanIdentityId,
+      displayName: null,
+      email: "shared-apple-user@example.com",
+      status: "active",
+      signInMethods: ["apple"],
+    });
+    assert.equal(byEmail.body.includes("private-apple-team-subject"), false);
+
+    const byHumanId = await app.inject({
+      method: "GET",
+      url: `/administration/platform/identities/resolve?humanIdentityId=${appleOnly.humanIdentityId}`,
+      headers: platformHeaders,
+    });
+    assert.equal(byHumanId.statusCode, 200);
+    assert.equal(byHumanId.json().humanIdentityId, appleOnly.humanIdentityId);
+
+    const granted = await app.inject({
+      method: "POST",
+      url: "/administration/team",
+      headers: tenantHeaders(f.owner.session.sessionId),
+      payload: { identifier: "shared-apple-user@example.com", tenantRole: "staff" },
+    });
+    assert.equal(granted.statusCode, 200);
+    assert.equal(granted.json().membership.humanIdentityId, appleOnly.humanIdentityId);
+    const context = await f.services.controlPlane.workforceContext(
+      appleOnly.humanIdentityId,
+      COCO_DEVELOPMENT_TENANT_ID,
+      COCO_PRODUCT_ID,
+    );
+    assert.equal(context.workforceContextSatisfied, true);
+  });
+
+  it("returns an explicit conflict for ambiguous email discovery and leaves Human-ID fallback unambiguous", async () => {
+    const f = await fixture();
+    const passwordHuman = await f.services.register.execute({ email: "ambiguous@example.com", password: "correct-password" });
+    f.appleVerifier.accept("ambiguous-directory-token", {
+      subject: "private-ambiguous-subject",
+      email: "ambiguous@example.com",
+      emailVerified: true,
+    });
+    const appleHuman = await f.services.authenticateFederated.execute({
+      provider: "apple",
+      identityToken: "ambiguous-directory-token",
+      nonce: "ambiguous_directory_nonce_at_least_32_chars",
+    });
+    assert.notEqual(passwordHuman.humanIdentityId, appleHuman.humanIdentityId);
+    app = buildApp(f.services);
+    const headers = { authorization: `Bearer ${f.platformAdministrator.session.sessionId}` };
+
+    const ambiguous = await app.inject({
+      method: "GET",
+      url: "/administration/platform/identities/resolve?identifier=ambiguous%40example.com",
+      headers,
+    });
+    assert.equal(ambiguous.statusCode, 409);
+    assert.equal(ambiguous.json().error.code, "IDENTITY_AMBIGUOUS");
+    assert.equal(ambiguous.body.includes("private-ambiguous-subject"), false);
+
+    const canonical = await app.inject({
+      method: "GET",
+      url: `/administration/platform/identities/resolve?identifier=${appleHuman.humanIdentityId}`,
+      headers,
+    });
+    assert.equal(canonical.statusCode, 200);
+    assert.equal(canonical.json().humanIdentityId, appleHuman.humanIdentityId);
+  });
+
   it("supports the complete Platform Tenant, Product, identity, and Team HTTP workflow", async () => {
     const f = await fixture();
     const initialOwner = await f.services.register.execute({ email: "new-owner@example.com", password: "correct-password" });
@@ -138,6 +228,7 @@ describe("administration HTTP boundaries", () => {
       displayName: null,
       email: "new-worker@example.com",
       status: "active",
+      signInMethods: ["email_password"],
     });
     assert.equal((await app.inject({
       method: "POST",
@@ -153,6 +244,7 @@ describe("administration HTTP boundaries", () => {
       displayName: null,
       email: "new-worker@example.com",
       humanIdentityStatus: "active",
+      signInMethods: ["email_password"],
       status: "active",
       membershipStatus: "active",
       tenantRole: "admin",
@@ -164,7 +256,8 @@ describe("administration HTTP boundaries", () => {
         entitlementStatus: "active",
       }],
     });
-    assert.equal(JSON.stringify(projectedWorker).includes("password"), false);
+    assert.equal("passwordHash" in projectedWorker, false);
+    assert.equal("providerSubject" in projectedWorker, false);
   });
 
   it("requires a current Platform Administrator principal on every new Platform route", async () => {

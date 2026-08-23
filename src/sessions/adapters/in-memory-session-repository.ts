@@ -1,6 +1,7 @@
 import type { Session } from "../domain/session.js";
 import type { SessionId } from "../domain/session-id.js";
 import type { SessionRepository } from "../ports/session-repository.js";
+import type { HumanIdentityId } from "../../identity/domain/human-identity-id.js";
 
 export class InMemorySessionRepository implements SessionRepository {
   private readonly sessions = new Map<string, Session>();
@@ -16,6 +17,12 @@ export class InMemorySessionRepository implements SessionRepository {
   async findActiveById(id: SessionId): Promise<Session | null> {
     const session = await this.findById(id);
     return session?.status === "active" ? session : null;
+  }
+
+  async listByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<readonly Session[]> {
+    return [...this.sessions.values()]
+      .filter((session) => session.humanIdentityId.equals(humanIdentityId))
+      .map((session) => session.copy());
   }
 
   async revoke(id: SessionId): Promise<void> {

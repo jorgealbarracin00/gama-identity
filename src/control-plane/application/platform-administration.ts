@@ -71,6 +71,7 @@ export interface PlatformTeamMemberProjection {
   readonly displayName: null;
   readonly email: string | null;
   readonly humanIdentityStatus: "active" | "suspended" | "retired" | null;
+  readonly signInMethods: readonly string[];
   /** Compatibility alias retained for the original Platform Team contract. */
   readonly status: TenantMembership["status"];
   readonly membershipStatus: TenantMembership["status"];
@@ -225,6 +226,16 @@ export class PlatformAdministration {
     return this.workforce.resolveHumanIdentityByEmail(email);
   }
 
+  async resolveHumanIdentityById(actorHumanIdentityId: string, humanIdentityId: string): Promise<ResolvedHumanIdentity> {
+    await this.principals.platform(actorHumanIdentityId);
+    return this.workforce.resolveHumanIdentityById(humanIdentityId);
+  }
+
+  async resolveHumanIdentity(actorHumanIdentityId: string, identifier: string): Promise<ResolvedHumanIdentity> {
+    await this.principals.platform(actorHumanIdentityId);
+    return this.workforce.resolveHumanIdentity(identifier);
+  }
+
   async listTenantWorkforce(actorHumanIdentityId: string, tenantId: string): Promise<readonly PlatformTeamMemberProjection[]> {
     await this.principals.platform(actorHumanIdentityId);
     const [memberships, participations] = await Promise.all([
@@ -349,12 +360,16 @@ export class PlatformAdministration {
         };
       })),
     ]);
+    const resolvedIdentity = identity?.status === "active"
+      ? await this.workforce.resolveHumanIdentityById(identity.id.value)
+      : null;
     return {
       tenantId: membership.tenantId,
       humanIdentityId: membership.humanIdentityId,
       displayName: null,
-      email: credential?.email.value ?? null,
+      email: resolvedIdentity?.email ?? credential?.email.value ?? null,
       humanIdentityStatus: identity?.status ?? null,
+      signInMethods: resolvedIdentity?.signInMethods ?? [],
       status: membership.status,
       membershipStatus: membership.status,
       tenantRole: membership.tenantRole,

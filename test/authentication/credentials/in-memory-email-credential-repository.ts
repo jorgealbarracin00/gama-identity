@@ -47,4 +47,12 @@ export class InMemoryEmailCredentialRepository
     );
     return credential?.copy() ?? null;
   }
+
+  async listByHumanIdentityId(
+    humanIdentityId: HumanIdentityId,
+  ): Promise<readonly EmailCredential[]> {
+    return [...this.credentials.values()]
+      .filter((stored) => stored.humanIdentityId.equals(humanIdentityId))
+      .map((stored) => stored.copy());
+  }
 }

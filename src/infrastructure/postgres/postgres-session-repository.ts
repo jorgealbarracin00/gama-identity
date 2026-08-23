@@ -57,6 +57,14 @@ export class PostgresSessionRepository implements SessionRepository {
     return toSession(result.rows[0]);
   }
 
+  async listByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<readonly Session[]> {
+    const result = await this.database.query<SessionRow>(
+      `${selectSession} WHERE human_identity_id = $1 ORDER BY created_at, id`,
+      [humanIdentityId.value],
+    );
+    return result.rows.map((row) => toSession(row)!);
+  }
+
   async revoke(id: SessionId): Promise<void> {
     await this.database.query(
       `UPDATE sessions

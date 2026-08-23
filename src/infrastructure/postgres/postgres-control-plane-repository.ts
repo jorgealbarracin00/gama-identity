@@ -143,6 +143,10 @@ export class PostgresControlPlaneRepository implements ControlPlaneRepository {
     const result = await this.database.query<MembershipRow>(`${selectMembership} WHERE tenant_id = $1 ORDER BY created_at, human_identity_id`, [tenantId]);
     return result.rows.map(toMembership).filter((membership): membership is TenantMembership => membership !== null);
   }
+  async listMembershipsForHuman(humanIdentityId: string): Promise<readonly TenantMembership[]> {
+    const result = await this.database.query<MembershipRow>(`${selectMembership} WHERE human_identity_id = $1 ORDER BY created_at, tenant_id`, [humanIdentityId]);
+    return result.rows.map(toMembership).filter((membership): membership is TenantMembership => membership !== null);
+  }
   async lockMembershipsForTenant(tenantId: string): Promise<readonly TenantMembership[]> {
     // The Tenant row also serializes creation of the first/new membership;
     // row-locking only existing memberships would leave an empty-key race.
@@ -174,6 +178,11 @@ export class PostgresControlPlaneRepository implements ControlPlaneRepository {
   async listEntitlementsForHuman(tenantId: string, humanIdentityId: string): Promise<readonly ProductEntitlement[]> {
     const result = await this.database.query<EntitlementRow>(`SELECT tenant_id, product_id, human_identity_id, status FROM product_entitlements
       WHERE tenant_id = $1 AND human_identity_id = $2 ORDER BY product_id`, [tenantId, humanIdentityId]);
+    return result.rows.map((row) => ({ tenantId: row.tenant_id, productId: row.product_id, humanIdentityId: row.human_identity_id, status: row.status }));
+  }
+  async listEntitlementsForHumanAcrossTenants(humanIdentityId: string): Promise<readonly ProductEntitlement[]> {
+    const result = await this.database.query<EntitlementRow>(`SELECT tenant_id, product_id, human_identity_id, status FROM product_entitlements
+      WHERE human_identity_id = $1 ORDER BY tenant_id, product_id`, [humanIdentityId]);
     return result.rows.map((row) => ({ tenantId: row.tenant_id, productId: row.product_id, humanIdentityId: row.human_identity_id, status: row.status }));
   }
   async appendAudit(event: PlatformAuditEvent): Promise<void> {

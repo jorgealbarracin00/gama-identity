@@ -1,5 +1,3 @@
-import type { EmailCredentialRepository } from "../../authentication/credentials/ports/email-credential-repository.js";
-import { HumanIdentityId } from "../../identity/domain/human-identity-id.js";
 import type {
   LifecycleStatus,
   ProductEntitlement,
@@ -24,6 +22,7 @@ export interface TenantAdministrationContext {
 export interface TeamMemberProjection {
   readonly humanIdentityId: string;
   readonly email: string | null;
+  readonly signInMethods: readonly string[];
   readonly tenantRole: TenantWorkforceRole;
   readonly membershipStatus: LifecycleStatus;
   readonly productParticipationStatus: LifecycleStatus | null;
@@ -35,7 +34,6 @@ export class TenantTeamAdministration {
     private readonly principals: AdministrationPrincipals,
     private readonly workforce: WorkforceAdministration,
     private readonly repository: ControlPlaneRepository,
-    private readonly credentials: EmailCredentialRepository,
   ) {}
 
   async listTeam(context: TenantAdministrationContext): Promise<readonly TeamMemberProjection[]> {
@@ -45,13 +43,14 @@ export class TenantTeamAdministration {
       this.repository.findParticipation(principal.tenantId, principal.productId),
     ]);
     return Promise.all(memberships.map(async (membership) => {
-      const [credential, entitlement] = await Promise.all([
-        this.credentials.findByHumanIdentityId(HumanIdentityId.from(membership.humanIdentityId)),
+      const [identity, entitlement] = await Promise.all([
+        this.workforce.inspectHumanIdentityById(membership.humanIdentityId),
         this.repository.findEntitlement(principal.tenantId, principal.productId, membership.humanIdentityId),
       ]);
       return {
         humanIdentityId: membership.humanIdentityId,
-        email: credential?.email.value ?? null,
+        email: identity.email,
+        signInMethods: identity.signInMethods,
         tenantRole: membership.tenantRole,
         membershipStatus: membership.status,
         productParticipationStatus: participation?.status ?? null,
@@ -62,11 +61,11 @@ export class TenantTeamAdministration {
 
   async addTeamMember(
     context: TenantAdministrationContext,
-    email: string,
+    identifier: string,
     requestedRole: string,
   ): Promise<ProductWorkforceAccess> {
     const principal = await this.requireTeamAdministrator(context);
-    const target = await this.workforce.resolveHumanIdentityByEmail(email);
+    const target = await this.workforce.resolveHumanIdentity(identifier);
     this.rejectSelfMutation(principal, target.humanIdentityId);
     const existing = await this.repository.findMembership(principal.tenantId, target.humanIdentityId);
     this.authorizeGrant(principal, existing, requestedRole);

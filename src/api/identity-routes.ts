@@ -7,6 +7,7 @@ import type { IdentityServices } from "./services.js";
 import { SessionId } from "../sessions/domain/session-id.js";
 import { AppError } from "../shared/errors.js";
 import { FederatedAuthenticationError } from "../authentication/federated/application/errors.js";
+import { FederatedAuthenticationMethodError } from "../authentication/federated/application/manage-federated-authentication-methods.js";
 
 const credentialsSchema = z.object({
   email: z.string(),
@@ -71,6 +72,46 @@ export function identityRoutes(
       }
     });
 
+    app.get("/authentication/methods", async (request, reply) => {
+      try {
+        const methods = await services.federatedAuthenticationMethods.list(bearerSessionId(request));
+        return reply.send({ methods });
+      } catch (error) {
+        throw translateAuthenticationMethodsError(error);
+      }
+    });
+
+    app.post("/authentication/federated/:provider/link", async (request, reply) => {
+      const provider = federatedProviderSchema.safeParse(request.params);
+      const credential = federatedCredentialSchema.safeParse(request.body);
+      if (!provider.success || !credential.success) {
+        throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      }
+      try {
+        return reply.send(await services.federatedAuthenticationMethods.link(
+          bearerSessionId(request),
+          { provider: provider.data.provider, ...credential.data },
+        ));
+      } catch (error) {
+        throw translateAuthenticationMethodsError(error);
+      }
+    });
+
+    app.delete("/authentication/federated/:provider/link", async (request, reply) => {
+      const provider = federatedProviderSchema.safeParse(request.params);
+      if (!provider.success) {
+        throw new AppError("Invalid provider", "INVALID_REQUEST", 400);
+      }
+      try {
+        return reply.send(await services.federatedAuthenticationMethods.unlink(
+          bearerSessionId(request),
+          provider.data.provider,
+        ));
+      } catch (error) {
+        throw translateAuthenticationMethodsError(error);
+      }
+    });
+
     app.post("/logout", async (request, reply) => {
       const sessionId = bearerSessionId(request);
       await services.logout.execute(sessionId);
@@ -90,6 +131,28 @@ export function identityRoutes(
       return reply.send(result);
     });
   };
+}
+
+function translateAuthenticationMethodsError(error: unknown): Error {
+  if (error instanceof FederatedAuthenticationError) {
+    return translateFederatedAuthenticationError(error);
+  }
+  if (!(error instanceof FederatedAuthenticationMethodError)) {
+    return error instanceof Error ? error : new Error("Authentication method operation failed");
+  }
+  if (error.code.startsWith("SESSION_")) {
+    return new AppError("Session is not authenticated", error.code, 401);
+  }
+  if (error.code === "IDENTITY_UNAVAILABLE") {
+    return new AppError("The Human Identity is unavailable", error.code, 403);
+  }
+  if (error.code === "FEDERATED_IDENTITY_LINK_CONFLICT") {
+    return new AppError("A different provider identity is already connected", error.code, 409);
+  }
+  if (error.code === "FEDERATED_IDENTITY_RECONCILIATION_REQUIRED") {
+    return new AppError("This provider identity belongs to another account and cannot be safely reconciled", error.code, 409);
+  }
+  return new AppError("The last authentication method cannot be removed", error.code, 409);
 }
 
 function translateFederatedAuthenticationError(error: unknown): Error {

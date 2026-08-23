@@ -26,6 +26,13 @@ export class FederatedIdentitySubjectConflictError extends Error {
   }
 }
 
+export class FederatedIdentityHumanProviderConflictError extends Error {
+  constructor() {
+    super("The Human Identity already has this federated provider assigned");
+    this.name = "FederatedIdentityHumanProviderConflictError";
+  }
+}
+
 function messageFor(code: FederatedAuthenticationErrorCode): string {
   switch (code) {
     case "MALFORMED_CREDENTIAL": return "The federated credential is malformed";

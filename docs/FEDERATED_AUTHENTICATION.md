@@ -91,19 +91,38 @@ The PostgreSQL unique constraint plus transaction retry resolves concurrent firs
 sign-ins for one provider subject to the winning Human. In-memory execution is
 serialized to preserve the same behavior.
 
-## Apple email and account linking
+## Apple email and explicit account linking
 
 The optional signed Apple `email`, `email_verified`, and `is_private_email`
 claims are stored only as provider metadata. A private relay address is retained
 with `provider_email_private = true`. Missing email on a returning sign-in does
 not erase metadata captured earlier.
 
-This release intentionally implements no account-linking endpoint. If an unknown
-Apple subject carries an email matching an existing password account, GAMA
-creates a new Human Identity. This can represent one physical person twice, but
-prevents an unsafe email-only account takeover. Future linking must be an explicit
-ceremony proving control of both the authenticated GAMA account and the external
-provider credential; it must never infer ownership from matching email.
+If an unknown Apple subject carries an email matching an existing password
+account, ordinary Apple sign-in still creates a new Human Identity. Email equality
+never changes ownership.
+
+Linking is a separate explicit ceremony. The caller supplies an ordinary GAMA
+bearer session plus a fresh provider token and nonce. The session determines the
+target Human, while cryptographic provider verification determines the provider
+subject. The request schema rejects caller-supplied Human, subject, email, Tenant,
+Product, role and grant fields.
+
+An unowned provider subject is attached to the authenticated Human. A relationship
+already owned by that Human is an idempotent success. A provider subject owned by
+another Human returns a stable reconciliation conflict unless that source is an
+active, signed-out, federated-only Human with no credential history, other
+federated relationship, Tenant membership, Product Entitlement or Platform
+Administration membership visible to GAMA. Under that narrow policy, GAMA revokes
+the source's stale sessions, reassigns only the verified provider relationship,
+and retires the source Human in one transaction. It does not copy or merge Coco
+cart, order, preference or other Product-domain data. Any GAMA-visible authority
+or relationship makes reconciliation fail closed for a higher-level recovery or
+merge workflow.
+
+Unlinking disables rather than deletes the relationship and refuses to remove the
+last active authentication method. It never deletes the Human or changes Product,
+Tenant, workforce or Platform authority.
 
 ## Public API
 
@@ -146,6 +165,24 @@ Public error codes are deliberately sanitized:
 - `FEDERATED_AUTHENTICATION_UNAVAILABLE`
 - `FEDERATED_IDENTITY_CONFLICT`
 - `FEDERATED_VERIFICATION_UNAVAILABLE`
+- `SESSION_INVALID`, `SESSION_EXPIRED`, `SESSION_REVOKED`
+- `FEDERATED_IDENTITY_LINK_CONFLICT`
+- `FEDERATED_IDENTITY_RECONCILIATION_REQUIRED`
+- `LAST_AUTHENTICATION_METHOD`
+
+Authenticated method management uses:
+
+```http
+GET /authentication/methods
+POST /authentication/federated/apple/link
+DELETE /authentication/federated/apple/link
+Authorization: Bearer <ordinary GAMA session>
+```
+
+The link body is exactly `identityToken` plus raw one-time `nonce`; unlink has no
+credential body. Method projections contain the canonical Human ID, active email
+credential display state, provider name and safe provider email metadata. They
+never contain a provider subject, bearer, provider token or nonce.
 
 Internal typed errors retain malformed/signature/issuer/audience/expiration/nonce,
 replay, lifecycle, conflict, and verification-infrastructure classifications for
@@ -175,10 +212,26 @@ keys to existing Humans. It performs no backfill and does not update or delete
 Humans, email credentials, sessions, Tenant relationships, Product relationships,
 Platform Administration membership, Coco owner state, or audit history.
 
+Migration `007_federated_account_linking.sql` additively enforces at most one
+active relationship for a Human/provider pair. The existing global
+`(provider, providerSubject)` uniqueness remains authoritative. Advisory
+transaction locks serialize provider-subject and Human/provider decisions across
+ordinary sign-in, link, unlink and reconciliation.
+
+Migration `008_federated_email_discovery.sql` adds only an indexed administrative
+lookup path for verified provider email metadata on active relationships. The
+lookup returns canonical Human IDs and provider-name labels; it never returns a
+provider subject, token or nonce. Email equality remains discovery evidence only:
+multiple active Humans exposing the same email produce an ambiguity conflict and
+no merge or authorization mutation. Administrators can resolve a known canonical
+Human ID instead.
+
 Normal account registration currently has no identity-account audit stream;
 Platform audit events are reserved for security/authorization relationships.
 Federated registration follows the same behavior and creates no workforce audit
-event.
+event. Link, unlink and duplicate reconciliation append safe Platform audit
+events containing GAMA relationship/Human identifiers, provider and outcome;
+provider subject, token and nonce material are excluded.
 
 ## Google extension point
 

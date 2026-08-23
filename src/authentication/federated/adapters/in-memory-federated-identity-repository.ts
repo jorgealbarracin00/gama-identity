@@ -1,4 +1,7 @@
-import { FederatedIdentitySubjectConflictError } from "../application/errors.js";
+import {
+  FederatedIdentityHumanProviderConflictError,
+  FederatedIdentitySubjectConflictError,
+} from "../application/errors.js";
 import type {
   FederatedIdentity,
   FederatedIdentityProvider,
@@ -8,6 +11,7 @@ import type {
   FederatedAuthenticationNonceRepository,
   FederatedIdentityRepository,
 } from "../ports/federated-identity-repository.js";
+import type { HumanIdentityId } from "../../../identity/domain/human-identity-id.js";
 
 export class InMemoryFederatedIdentityRepository implements FederatedIdentityRepository {
   private readonly identities = new Map<string, FederatedIdentity>();
@@ -21,6 +25,15 @@ export class InMemoryFederatedIdentityRepository implements FederatedIdentityRep
     );
     if (conflicting !== null && !conflicting.id.equals(identity.id)) {
       throw new FederatedIdentitySubjectConflictError();
+    }
+    if (identity.status === "active") {
+      const providerConflict = await this.findActiveByHumanIdentityAndProvider(
+        identity.humanIdentityId,
+        identity.provider,
+      );
+      if (providerConflict !== null && !providerConflict.id.equals(identity.id)) {
+        throw new FederatedIdentityHumanProviderConflictError();
+      }
     }
     this.identities.set(identity.id.value, identity.copy());
   }
@@ -37,6 +50,47 @@ export class InMemoryFederatedIdentityRepository implements FederatedIdentityRep
     }
     return null;
   }
+
+  async listByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<readonly FederatedIdentity[]> {
+    return [...this.identities.values()]
+      .filter((identity) => identity.humanIdentityId.equals(humanIdentityId))
+      .map((identity) => identity.copy());
+  }
+
+  async listActiveByVerifiedProviderEmail(email: string): Promise<readonly FederatedIdentity[]> {
+    const comparableEmail = email.toLocaleLowerCase("en-US");
+    return [...this.identities.values()]
+      .filter((identity) =>
+        identity.status === "active" &&
+        identity.providerEmailVerified === true &&
+        identity.providerEmail?.toLocaleLowerCase("en-US") === comparableEmail
+      )
+      .map((identity) => identity.copy());
+  }
+
+  async findActiveByHumanIdentityAndProvider(
+    humanIdentityId: HumanIdentityId,
+    provider: FederatedIdentityProvider,
+  ): Promise<FederatedIdentity | null> {
+    for (const identity of this.identities.values()) {
+      if (
+        identity.status === "active" &&
+        identity.humanIdentityId.equals(humanIdentityId) &&
+        identity.provider.equals(provider)
+      ) return identity.copy();
+    }
+    return null;
+  }
+
+  async lockProviderSubject(
+    _provider: FederatedIdentityProvider,
+    _providerSubject: FederatedProviderSubject,
+  ): Promise<void> {}
+
+  async lockHumanProvider(
+    _humanIdentityId: HumanIdentityId,
+    _provider: FederatedIdentityProvider,
+  ): Promise<void> {}
 }
 
 export class InMemoryFederatedAuthenticationNonceRepository

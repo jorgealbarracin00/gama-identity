@@ -29,6 +29,7 @@ export interface ControlPlaneRepository {
   saveMembership(membership: TenantMembership): Promise<void>;
   findMembership(tenantId: string, humanIdentityId: string): Promise<TenantMembership | null>;
   listMembershipsForTenant(tenantId: string): Promise<readonly TenantMembership[]>;
+  listMembershipsForHuman(humanIdentityId: string): Promise<readonly TenantMembership[]>;
   lockMembershipsForTenant(tenantId: string): Promise<readonly TenantMembership[]>;
   saveParticipation(participation: ProductParticipation): Promise<void>;
   findParticipation(tenantId: string, productId: string): Promise<ProductParticipation | null>;
@@ -36,5 +37,6 @@ export interface ControlPlaneRepository {
   saveEntitlement(entitlement: ProductEntitlement): Promise<void>;
   findEntitlement(tenantId: string, productId: string, humanIdentityId: string): Promise<ProductEntitlement | null>;
   listEntitlementsForHuman(tenantId: string, humanIdentityId: string): Promise<readonly ProductEntitlement[]>;
+  listEntitlementsForHumanAcrossTenants(humanIdentityId: string): Promise<readonly ProductEntitlement[]>;
   appendAudit(event: PlatformAuditEvent): Promise<void>;
 }

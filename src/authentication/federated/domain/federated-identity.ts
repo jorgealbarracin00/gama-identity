@@ -66,7 +66,7 @@ export interface FederatedIdentitySnapshot {
 export class FederatedIdentity {
   private constructor(
     private readonly federatedIdentityId: FederatedIdentityId,
-    private readonly ownerId: HumanIdentityId,
+    private ownerId: HumanIdentityId,
     private readonly identityProvider: FederatedIdentityProvider,
     private readonly subject: FederatedProviderSubject,
     private email: string | null,
@@ -134,6 +134,24 @@ export class FederatedIdentity {
     this.email = metadata.email;
     this.emailVerified = metadata.emailVerified;
     this.emailPrivate = metadata.emailPrivate;
+    this.lastUpdatedTime = new Date(clock.now());
+  }
+
+  reassignTo(humanIdentityId: HumanIdentityId, clock: Clock): void {
+    if (this.ownerId.equals(humanIdentityId)) return;
+    this.ownerId = humanIdentityId;
+    this.lastUpdatedTime = new Date(clock.now());
+  }
+
+  activate(clock: Clock): void {
+    if (this.lifecycleStatus === "active") return;
+    this.lifecycleStatus = "active";
+    this.lastUpdatedTime = new Date(clock.now());
+  }
+
+  disable(clock: Clock): void {
+    if (this.lifecycleStatus === "disabled") return;
+    this.lifecycleStatus = "disabled";
     this.lastUpdatedTime = new Date(clock.now());
   }
 

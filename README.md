@@ -96,7 +96,9 @@ Sign in with Apple is the first federated provider. GAMA verifies Apple's signed
 identity token, issuer, configured audience, expiration and nonce against Apple's
 rotating public keys, then resolves `(provider, providerSubject)`. Unknown Apple
 subjects create a new canonical Human transactionally; matching email never
-silently links an existing account. See
+silently links an existing account. An authenticated Human may explicitly connect
+Apple by proving both its ordinary GAMA session and a fresh verified Apple
+credential. See
 [`docs/FEDERATED_AUTHENTICATION.md`](docs/FEDERATED_AUTHENTICATION.md).
 
 ## Session flow
@@ -151,6 +153,28 @@ Accepts only an Apple identity token and its raw one-time nonce. The server
 cryptographically verifies Apple and returns the same ordinary opaque GAMA
 session contract. It does not accept a subject, email, Human Identity ID, or any
 authorization relationship from the caller.
+
+### `GET /authentication/methods`
+
+Requires an ordinary GAMA bearer session and returns that Human's safe,
+provider-neutral sign-in-method projection. Provider subjects, tokens and nonce
+material are never returned.
+
+### `POST /authentication/federated/:provider/link`
+
+Requires an ordinary GAMA bearer session plus the same strict verified-provider
+credential body used by federated sign-in. The session selects the target Human;
+the verified token selects the provider identity. The request cannot select a
+Human, subject, email, Tenant, Product, role or grant. Outcomes are `linked`,
+`already_linked`, or the deliberately narrow `reconciled` result described in
+the federated-authentication design document.
+
+### `DELETE /authentication/federated/:provider/link`
+
+Disables the active provider relationship without deleting its Human or changing
+authorization. The operation is idempotent and rejects removal of the last usable
+authentication method. Coco currently exposes Connect Apple but defers the
+reauthentication-sensitive disconnect action.
 
 ### `GET /session`
 
@@ -348,6 +372,20 @@ no existing identity, credential, session, workforce, Platform Administration,
 or Coco relationship. Applying it to any environment is a separate deployment
 operation.
 
+Migration `007_federated_account_linking.sql` adds the partial unique index that
+permits at most one active relationship for each `(humanIdentityId, provider)`.
+It does not reassign relationships or mutate any Human, credential, session,
+workforce, Platform Administration or Product-domain record. Applying it to an
+environment is a separate deployment operation.
+
+Migration `008_federated_email_discovery.sql` adds a partial, case-insensitive
+index over verified email metadata on active federated relationships. It changes
+no identity ownership and grants no authority. Platform/Tenant administrators may
+use that metadata to discover a safe canonical Human projection; ambiguous email
+evidence fails closed and canonical Human ID remains the unambiguous fallback.
+Applying it is a separate deployment operation and must precede a runtime that
+depends on the indexed discovery path.
+
 PostgreSQL integration tests are isolated from the runtime connection variable:
 
 ```bash
@@ -458,6 +496,12 @@ GAMA session remains active.
   tokens. Provider email is metadata and never triggers account linking.
 - Federated nonces are verified against the signed token and consumed once; raw
   nonces and provider tokens are not persisted or deliberately logged.
+- Linking derives the target Human only from the authenticated GAMA session and
+  never from provider email. Reconciliation is limited to a signed-out,
+  federated-only active duplicate with no credential history, other provider
+  relationship, live session, Tenant membership, Product Entitlement or Platform
+  authority visible to GAMA. It retires the duplicate, revokes its sessions and
+  moves only the verified provider relationship; it never merges Coco data.
 - Repository reads return copies so callers cannot mutate persisted state
   outside repository operations.
 - All SQL uses parameterized values.
