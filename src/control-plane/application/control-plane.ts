@@ -9,7 +9,9 @@ import {
   COCO_DEVELOPMENT_TENANT_ID,
   COCO_PRODUCT_ID,
   COCO_WORKLOAD_ID,
+  capabilitiesForTenantWorkforceRole,
   type LifecycleStatus,
+  type TenantWorkforceCapability,
   type TenantWorkforceRole,
 } from "../models.js";
 import type { ControlPlaneRepository } from "../ports/control-plane-repository.js";
@@ -33,6 +35,7 @@ export interface WorkforceContext {
   readonly participationActive: boolean;
   readonly entitlementActive: boolean;
   readonly workforceContextSatisfied: boolean;
+  readonly capabilities: readonly TenantWorkforceCapability[];
 }
 
 export interface AuthenticatedWorkload {
@@ -173,9 +176,12 @@ export class ControlPlane {
     const membershipActive = active(membership?.status);
     const participationActive = active(participation?.status);
     const entitlementActive = active(entitlement?.status);
+    const workforceContextSatisfied = humanIdentityActive && tenantActive && productActive && membershipActive && participationActive && entitlementActive;
+    const tenantRole = membership?.tenantRole ?? null;
     return { humanIdentityId, tenantId, productId, humanIdentityActive, tenantActive, productActive, membershipActive,
-      membershipStatus: membership?.status ?? null, tenantRole: membership?.tenantRole ?? null, participationActive, entitlementActive,
-      workforceContextSatisfied: humanIdentityActive && tenantActive && productActive && membershipActive && participationActive && entitlementActive };
+      membershipStatus: membership?.status ?? null, tenantRole, participationActive, entitlementActive,
+      workforceContextSatisfied,
+      capabilities: workforceContextSatisfied && tenantRole !== null ? capabilitiesForTenantWorkforceRole(tenantRole) : [] };
   }
 
   async authenticateWorkload(workloadId: string, secret: string): Promise<AuthenticatedWorkload | null> {

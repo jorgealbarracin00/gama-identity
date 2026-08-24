@@ -54,6 +54,13 @@ describe("administration principal boundaries", () => {
   it("accepts only a current active Platform administrator membership", async () => {
     const f = await fixture();
     await assert.doesNotReject(() => f.services.administration.platform.listTenants(f.platformAdministrator.humanIdentityId));
+    const platformAdministratorCocoContext = await f.services.controlPlane.workforceContext(
+      f.platformAdministrator.humanIdentityId,
+      COCO_DEVELOPMENT_TENANT_ID,
+      COCO_PRODUCT_ID,
+    );
+    assert.equal(platformAdministratorCocoContext.workforceContextSatisfied, false);
+    assert.deepEqual(platformAdministratorCocoContext.capabilities, []);
     await assert.rejects(
       () => f.services.administration.platform.listTenants(f.owner.humanIdentityId),
       hasCode("NOT_PLATFORM_ADMIN"),

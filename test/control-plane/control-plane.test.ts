@@ -5,6 +5,8 @@ import {
   COCO_DEVELOPMENT_TENANT_ID,
   COCO_PRODUCT_ID,
   COCO_WORKLOAD_ID,
+  TENANT_WORKFORCE_CAPABILITIES,
+  capabilitiesForTenantWorkforceRole,
 } from "../../src/control-plane/models.js";
 import { buildTestServices } from "../operational/test-doubles.js";
 import { HumanIdentityId } from "../../src/identity/domain/human-identity-id.js";
@@ -39,6 +41,34 @@ describe("Coco minimum control plane", () => {
     assert.equal(context.tenantRole, "owner");
     assert.equal(context.participationActive, true);
     assert.equal(context.entitlementActive, true);
+    assert.deepEqual(context.capabilities, TENANT_WORKFORCE_CAPABILITIES);
+  });
+
+  it("resolves one stable role capability policy for Owner, Admin, and Staff", async () => {
+    const { fixture, owner } = await bootstrapOwner();
+    const admin = await fixture.services.register.execute({ email: "admin@coco.example", password: "correct-password" });
+    const staff = await fixture.services.register.execute({ email: "staff@coco.example", password: "correct-password" });
+    for (const [humanIdentityId, tenantRole] of [[admin.humanIdentityId, "admin"], [staff.humanIdentityId, "staff"]] as const) {
+      await fixture.workforceAdministration.grantProductWorkforceAccess({
+        actorReference: owner.humanIdentityId,
+        tenantId: COCO_DEVELOPMENT_TENANT_ID,
+        productId: COCO_PRODUCT_ID,
+        humanIdentityId,
+        tenantRole,
+      });
+    }
+
+    const ownerContext = await fixture.services.controlPlane.workforceContext(owner.humanIdentityId, COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID);
+    const adminContext = await fixture.services.controlPlane.workforceContext(admin.humanIdentityId, COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID);
+    const staffContext = await fixture.services.controlPlane.workforceContext(staff.humanIdentityId, COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID);
+
+    assert.deepEqual(ownerContext.capabilities, capabilitiesForTenantWorkforceRole("owner"));
+    assert.deepEqual(adminContext.capabilities, capabilitiesForTenantWorkforceRole("admin"));
+    assert.deepEqual(staffContext.capabilities, capabilitiesForTenantWorkforceRole("staff"));
+    assert.equal(adminContext.capabilities.includes("ownership.manage"), false);
+    assert.equal(staffContext.capabilities.includes("products.create"), true);
+    assert.equal(staffContext.capabilities.includes("catalogue.view"), false);
+    assert.equal(staffContext.capabilities.includes("team.manage"), false);
   });
 
   it("authenticates the Coco Product Workload and rejects an invalid secret", async () => {
@@ -57,6 +87,7 @@ describe("Coco minimum control plane", () => {
     assert.equal(context.membershipActive, false);
     assert.equal(context.tenantRole, null);
     assert.equal(context.entitlementActive, false);
+    assert.deepEqual(context.capabilities, []);
   });
 
   it("rejects workforce context immediately when the Human Identity is suspended", async () => {
@@ -69,6 +100,7 @@ describe("Coco minimum control plane", () => {
     assert.equal(context.humanIdentityActive, false);
     assert.equal(context.membershipActive, true);
     assert.equal(context.workforceContextSatisfied, false);
+    assert.deepEqual(context.capabilities, []);
   });
 
   it("does not add a customer to the Coco Tenant merely because the customer has a Human Identity", async () => {

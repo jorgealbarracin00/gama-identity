@@ -3,7 +3,7 @@ import { afterEach, describe, it } from "node:test";
 import type { FastifyInstance } from "fastify";
 
 import { buildApp } from "../../src/api/app.js";
-import { COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID, COCO_WORKLOAD_ID } from "../../src/control-plane/models.js";
+import { COCO_DEVELOPMENT_TENANT_ID, COCO_PRODUCT_ID, COCO_WORKLOAD_ID, capabilitiesForTenantWorkforceRole } from "../../src/control-plane/models.js";
 import { buildTestServices } from "../operational/test-doubles.js";
 
 const workloadSecret = "coco-development-workload-secret";
@@ -21,6 +21,7 @@ describe("control-plane HTTP API", () => {
     assert.equal(response.statusCode, 200);
     assert.equal(response.json().workforceContextSatisfied, true);
     assert.equal(response.json().tenantRole, "owner");
+    assert.deepEqual(response.json().capabilities, capabilitiesForTenantWorkforceRole("owner"));
   });
 
   it("rejects a non-member from workforce context while preserving Human authentication", async () => {
@@ -73,5 +74,6 @@ describe("control-plane HTTP API", () => {
     });
     assert.equal(response.statusCode, 200);
     assert.equal(response.json().tenantRole, "staff");
+    assert.deepEqual(response.json().capabilities, capabilitiesForTenantWorkforceRole("staff"));
   });
 });
