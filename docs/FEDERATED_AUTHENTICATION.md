@@ -91,6 +91,24 @@ The PostgreSQL unique constraint plus transaction retry resolves concurrent firs
 sign-ins for one provider subject to the winning Human. In-memory execution is
 serialized to preserve the same behavior.
 
+## Resolve-only discovery
+
+`POST /authentication/federated/:provider/resolve` is a provider-neutral,
+unauthenticated discovery boundary for credential cutovers and other flows that
+must determine whether an exact verified external identity is already known
+without creating or linking identity state. It runs the registered provider's
+full credential verifier, consumes the verified nonce once, takes the existing
+provider/subject transaction lock, and performs the same unfiltered relationship
+lookup used by identity persistence.
+
+The result is only `EXISTING` or `UNLINKED`. `EXISTING` includes active,
+disabled, and retired relationship history. The use case has no Human Identity
+repository, ID generator, session service, account-linking service, or authority
+repository dependency, so it cannot create a Human, issue a session, link or
+change a relationship, infer identity from email, or alter Tenant/Product
+authority. The replay ledger entry for a successfully verified nonce is its sole
+persistent write.
+
 ## Apple email and explicit account linking
 
 The optional signed Apple `email`, `email_verified`, and `is_private_email`
@@ -157,6 +175,33 @@ The client cannot supply `subject`, `email`, `humanIdentityId`, Tenant, Product,
 role, or authorization fields. Strict request validation rejects additional
 properties.
 
+Resolve-only discovery accepts the same strict credential body:
+
+```http
+POST /authentication/federated/apple/resolve
+Content-Type: application/json
+
+{
+  "identityToken": "<Apple identity token>",
+  "nonce": "<raw one-time nonce>"
+}
+```
+
+Its complete success contract is one of:
+
+```json
+{ "outcome": "EXISTING" }
+```
+
+```json
+{ "outcome": "UNLINKED" }
+```
+
+It returns no Human ID, provider subject, email, session, Tenant, Product, role,
+or authority information. A successful result consumes the nonce even when the
+outcome is `UNLINKED`; replay uses the ordinary sanitized federated-credential
+error contract.
+
 Public error codes are deliberately sanitized:
 
 - `INVALID_REQUEST`
@@ -216,7 +261,7 @@ Migration `007_federated_account_linking.sql` additively enforces at most one
 active relationship for a Human/provider pair. The existing global
 `(provider, providerSubject)` uniqueness remains authoritative. Advisory
 transaction locks serialize provider-subject and Human/provider decisions across
-ordinary sign-in, link, unlink and reconciliation.
+ordinary sign-in, resolve, link, unlink and reconciliation.
 
 Migration `008_federated_email_discovery.sql` adds only an indexed administrative
 lookup path for verified provider email metadata on active relationships. The

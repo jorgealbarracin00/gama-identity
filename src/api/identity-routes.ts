@@ -72,6 +72,22 @@ export function identityRoutes(
       }
     });
 
+    app.post("/authentication/federated/:provider/resolve", async (request, reply) => {
+      const provider = federatedProviderSchema.safeParse(request.params);
+      const credential = federatedCredentialSchema.safeParse(request.body);
+      if (!provider.success || !credential.success) {
+        throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      }
+      try {
+        return reply.send(await services.resolveFederatedIdentity.execute({
+          provider: provider.data.provider,
+          ...credential.data,
+        }));
+      } catch (error) {
+        throw translateFederatedAuthenticationError(error);
+      }
+    });
+
     app.get("/authentication/methods", async (request, reply) => {
       try {
         const methods = await services.federatedAuthenticationMethods.list(bearerSessionId(request));

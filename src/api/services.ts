@@ -6,6 +6,7 @@ import {
 } from "../authentication/federated/adapters/in-memory-federated-identity-repository.js";
 import { AuthenticateFederated } from "../authentication/federated/application/authenticate-federated.js";
 import { ManageFederatedAuthenticationMethods } from "../authentication/federated/application/manage-federated-authentication-methods.js";
+import { ResolveFederatedIdentity } from "../authentication/federated/application/resolve-federated-identity.js";
 import {
   FederatedIdentityTokenVerifiers,
   UnavailableFederatedIdentityTokenVerifier,
@@ -77,6 +78,7 @@ export interface IdentityServices {
   };
   readonly login: Login;
   readonly authenticateFederated: AuthenticateFederated;
+  readonly resolveFederatedIdentity: ResolveFederatedIdentity;
   readonly federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   readonly logout: Logout;
   readonly validateSession: ValidateSession;
@@ -303,6 +305,7 @@ function composeServices(
   register: Register;
   login: Login;
   authenticateFederated: AuthenticateFederated;
+  resolveFederatedIdentity: ResolveFederatedIdentity;
   federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   logout: Logout;
   validateSession: ValidateSession;
@@ -335,8 +338,9 @@ function composeServices(
   const appleVerifier = runtimeConfig.APPLE_CLIENT_IDS.length === 0
     ? new UnavailableFederatedIdentityTokenVerifier(APPLE_FEDERATED_PROVIDER)
     : new AppleIdentityTokenVerifier({ clientIds: runtimeConfig.APPLE_CLIENT_IDS });
+  const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier]);
   const authenticateFederated = new AuthenticateFederated(
-    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedVerifiers,
     federatedIdentities,
     federatedNonces,
     identities,
@@ -346,8 +350,15 @@ function composeServices(
     clock,
     atomically,
   );
+  const resolveFederatedIdentity = new ResolveFederatedIdentity(
+    federatedVerifiers,
+    federatedIdentities,
+    federatedNonces,
+    clock,
+    atomically,
+  );
   const federatedAuthenticationMethods = new ManageFederatedAuthenticationMethods(
-    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedVerifiers,
     federatedIdentities,
     federatedNonces,
     identities,
@@ -369,6 +380,7 @@ function composeServices(
     ),
     login: new Login(authenticate, createSession),
     authenticateFederated,
+    resolveFederatedIdentity,
     federatedAuthenticationMethods,
     logout: new Logout(sessions),
     validateSession: new ValidateSession(sessions, clock),

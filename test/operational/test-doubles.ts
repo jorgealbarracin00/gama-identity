@@ -7,6 +7,7 @@ import {
 } from "../../src/authentication/federated/adapters/in-memory-federated-identity-repository.js";
 import { AuthenticateFederated } from "../../src/authentication/federated/application/authenticate-federated.js";
 import { ManageFederatedAuthenticationMethods } from "../../src/authentication/federated/application/manage-federated-authentication-methods.js";
+import { ResolveFederatedIdentity } from "../../src/authentication/federated/application/resolve-federated-identity.js";
 import { FederatedAuthenticationError } from "../../src/authentication/federated/application/errors.js";
 import {
   FederatedIdentityTokenVerifiers,
@@ -181,14 +182,22 @@ export function buildTestServices(): {
     clock,
     3600,
   );
+  const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier]);
   const authenticateFederated = new AuthenticateFederated(
-    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedVerifiers,
     federatedIdentities,
     federatedNonces,
     identities,
     identityIds,
     new FederatedIdentityIds(),
     createSession,
+    clock,
+    (work) => serial.execute(work),
+  );
+  const resolveFederatedIdentity = new ResolveFederatedIdentity(
+    federatedVerifiers,
+    federatedIdentities,
+    federatedNonces,
     clock,
     (work) => serial.execute(work),
   );
@@ -252,6 +261,7 @@ export function buildTestServices(): {
     ),
     login: new Login(authenticate, createSession),
     authenticateFederated,
+    resolveFederatedIdentity,
     federatedAuthenticationMethods,
     logout: new Logout(sessions),
     validateSession: new ValidateSession(sessions, clock),
