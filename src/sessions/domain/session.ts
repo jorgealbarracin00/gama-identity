@@ -13,6 +13,8 @@ export interface SessionSnapshot {
   readonly lastAccessedAt: Date;
   readonly expiresAt: Date;
   readonly status: SessionStatus;
+  readonly renewalTokenHash: string | null;
+  readonly renewalExpiresAt: Date | null;
 }
 
 export class Session {
@@ -23,16 +25,21 @@ export class Session {
     private lastAccessTime: Date,
     private readonly expirationTime: Date,
     private lifecycleStatus: SessionStatus,
+    private readonly renewalHash: string | null,
+    private readonly renewalExpirationTime: Date | null,
   ) {}
 
   static create(
     idGenerator: SessionIdGenerator,
     humanIdentityId: HumanIdentityId,
     durationSeconds: number,
+    renewalTokenHash: string,
+    renewalDurationSeconds: number,
     clock: Clock,
   ): Session {
-    if (!Number.isInteger(durationSeconds) || durationSeconds <= 0) {
-      throw new Error("Session duration must be a positive integer");
+    if (!Number.isInteger(durationSeconds) || durationSeconds <= 0 ||
+        !Number.isInteger(renewalDurationSeconds) || renewalDurationSeconds <= durationSeconds) {
+      throw new Error("Session and renewal durations must be positive and renewal must be longer");
     }
     const now = clock.now();
     return new Session(
@@ -42,6 +49,8 @@ export class Session {
       new Date(now),
       new Date(now.getTime() + durationSeconds * 1000),
       "active",
+      renewalTokenHash,
+      new Date(now.getTime() + renewalDurationSeconds * 1000),
     );
   }
 
@@ -53,6 +62,8 @@ export class Session {
       new Date(snapshot.lastAccessedAt),
       new Date(snapshot.expiresAt),
       snapshot.status,
+      snapshot.renewalTokenHash,
+      snapshot.renewalExpiresAt === null ? null : new Date(snapshot.renewalExpiresAt),
     );
   }
 
@@ -62,6 +73,16 @@ export class Session {
   get createdAt(): Date { return new Date(this.creationTime); }
   get lastAccessedAt(): Date { return new Date(this.lastAccessTime); }
   get expiresAt(): Date { return new Date(this.expirationTime); }
+  get renewalTokenHash(): string | null { return this.renewalHash; }
+  get renewalExpiresAt(): Date | null {
+    return this.renewalExpirationTime === null ? null : new Date(this.renewalExpirationTime);
+  }
+
+  canRenew(clock: Clock): "available" | "expired" | "revoked" | "unavailable" {
+    if (this.lifecycleStatus === "revoked") return "revoked";
+    if (this.renewalHash === null || this.renewalExpirationTime === null) return "unavailable";
+    return clock.now().getTime() < this.renewalExpirationTime.getTime() ? "available" : "expired";
+  }
 
   validate(clock: Clock): boolean {
     if (this.lifecycleStatus !== "active") return false;
@@ -101,6 +122,8 @@ export class Session {
       this.lastAccessedAt,
       this.expiresAt,
       this.lifecycleStatus,
+      this.renewalHash,
+      this.renewalExpiresAt,
     );
   }
 
@@ -112,6 +135,8 @@ export class Session {
       lastAccessedAt: this.lastAccessedAt,
       expiresAt: this.expiresAt,
       status: this.lifecycleStatus,
+      renewalTokenHash: this.renewalHash,
+      renewalExpiresAt: this.renewalExpiresAt,
     };
   }
 }

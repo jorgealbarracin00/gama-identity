@@ -10,6 +10,18 @@ describe("environment configuration", () => {
     assert.equal(config.DATABASE_URL, undefined);
     assert.equal(config.DATABASE_SSL, "disable");
     assert.deepEqual(config.APPLE_CLIENT_IDS, []);
+    assert.equal(config.SESSION_DURATION_SECONDS, 86_400);
+    assert.equal(config.SESSION_RENEWAL_DURATION_SECONDS, 2_592_000);
+  });
+
+  it("requires the renewable session lifetime to exceed bearer lifetime", () => {
+    assert.throws(
+      () => loadConfig({
+        SESSION_DURATION_SECONDS: "3600",
+        SESSION_RENEWAL_DURATION_SECONDS: "3600",
+      }),
+      /SESSION_RENEWAL_DURATION_SECONDS/,
+    );
   });
 
   it("parses one or more public Apple client identifiers without requiring Apple secrets", () => {

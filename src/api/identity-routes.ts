@@ -8,6 +8,7 @@ import { SessionId } from "../sessions/domain/session-id.js";
 import { AppError } from "../shared/errors.js";
 import { FederatedAuthenticationError } from "../authentication/federated/application/errors.js";
 import { FederatedAuthenticationMethodError } from "../authentication/federated/application/manage-federated-authentication-methods.js";
+import { SessionRenewalError } from "../sessions/application/use-cases.js";
 
 const credentialsSchema = z.object({
   email: z.string(),
@@ -19,6 +20,9 @@ const federatedProviderSchema = z.object({
 const federatedCredentialSchema = z.object({
   identityToken: z.string().min(1).max(16_384),
   nonce: z.string().min(32).max(256),
+}).strict();
+const sessionRenewalSchema = z.object({
+  renewalToken: z.string().min(32).max(512),
 }).strict();
 
 export function identityRoutes(
@@ -132,6 +136,25 @@ export function identityRoutes(
       const sessionId = bearerSessionId(request);
       await services.logout.execute(sessionId);
       return reply.status(204).send();
+    });
+
+    app.post("/session/refresh", async (request, reply) => {
+      const input = sessionRenewalSchema.safeParse(request.body);
+      if (!input.success) {
+        throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      }
+      try {
+        return reply.send({ session: await services.renewSession.execute(input.data.renewalToken) });
+      } catch (error) {
+        if (error instanceof SessionRenewalError) {
+          throw new AppError(
+            "Session cannot be renewed",
+            `SESSION_RENEWAL_${error.reason.toUpperCase()}`,
+            401,
+          );
+        }
+        throw error;
+      }
     });
 
     app.get("/session", async (request, reply) => {

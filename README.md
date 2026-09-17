@@ -418,7 +418,8 @@ Configuration is validated with Zod at startup and fails fast when invalid.
 | `PASSWORD_HASH_MEMORY_KIB` | `19456` | Argon2id memory cost |
 | `PASSWORD_HASH_ITERATIONS` | `2` | Argon2id time cost |
 | `PASSWORD_HASH_PARALLELISM` | `1` | Argon2id parallelism |
-| `SESSION_DURATION_SECONDS` | `86400` | Fixed session duration |
+| `SESSION_DURATION_SECONDS` | `86400` | Short-lived bearer session duration |
+| `SESSION_RENEWAL_DURATION_SECONDS` | `2592000` | Rotating renewable-session duration; must exceed bearer duration |
 | `REPOSITORY_MODE` | `memory` | `memory` or `postgres` infrastructure |
 | `DATABASE_URL` | — | Required in PostgreSQL mode |
 | `DATABASE_SSL` | `disable` | `disable` or `require` |

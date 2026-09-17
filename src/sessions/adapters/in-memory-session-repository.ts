@@ -19,6 +19,11 @@ export class InMemorySessionRepository implements SessionRepository {
     return session?.status === "active" ? session : null;
   }
 
+  async findByRenewalTokenHashForUpdate(hash: string): Promise<Session | null> {
+    return [...this.sessions.values()]
+      .find((session) => session.renewalTokenHash === hash)?.copy() ?? null;
+  }
+
   async listByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<readonly Session[]> {
     return [...this.sessions.values()]
       .filter((session) => session.humanIdentityId.equals(humanIdentityId))

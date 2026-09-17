@@ -48,6 +48,61 @@ describe("operational identity HTTP API", () => {
     assert.equal(revoked.json().error.code, "SESSION_REVOKED");
   });
 
+  it("renews an expired bearer once using a rotating renewal credential", async () => {
+    const { services, clock } = buildTestServices();
+    app = buildApp(services);
+    const registration = await app.inject({
+      method: "POST",
+      url: "/register",
+      payload: { email: "renew@example.com", password: "correct-password" },
+    });
+    const original = registration.json().session as {
+      sessionId: string;
+      renewalToken: string;
+    };
+    assert.ok(original.renewalToken);
+
+    clock.set(new Date("2026-01-01T02:00:00Z"));
+    const expired = await app.inject({
+      method: "GET",
+      url: "/session",
+      headers: { authorization: `Bearer ${original.sessionId}` },
+    });
+    assert.equal(expired.statusCode, 401);
+    assert.equal(expired.json().error.code, "SESSION_EXPIRED");
+
+    const refresh = await app.inject({
+      method: "POST",
+      url: "/session/refresh",
+      payload: { renewalToken: original.renewalToken },
+    });
+    assert.equal(refresh.statusCode, 200);
+    assert.notEqual(refresh.json().session.sessionId, original.sessionId);
+    assert.notEqual(refresh.json().session.renewalToken, original.renewalToken);
+
+    const replay = await app.inject({
+      method: "POST",
+      url: "/session/refresh",
+      payload: { renewalToken: original.renewalToken },
+    });
+    assert.equal(replay.statusCode, 401);
+    assert.equal(replay.json().error.code, "SESSION_RENEWAL_REVOKED");
+  });
+
+  it("rejects malformed renewal requests without session disclosure", async () => {
+    const { services } = buildTestServices();
+    app = buildApp(services);
+    const response = await app.inject({
+      method: "POST",
+      url: "/session/refresh",
+      payload: { renewalToken: "short", humanIdentityId: "caller-supplied" },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.deepEqual(response.json(), {
+      error: { code: "INVALID_REQUEST", message: "Invalid request body" },
+    });
+  });
+
   it("supports login and uses a uniform response for authentication failures", async () => {
     const { services } = buildTestServices();
     app = buildApp(services);

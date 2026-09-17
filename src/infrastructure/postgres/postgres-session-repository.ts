@@ -14,6 +14,8 @@ interface SessionRow {
   last_accessed_at: Date;
   expires_at: Date;
   status: SessionStatus;
+  renewal_token_hash: string | null;
+  renewal_expires_at: Date | null;
 }
 
 export class PostgresSessionRepository implements SessionRepository {
@@ -24,12 +26,14 @@ export class PostgresSessionRepository implements SessionRepository {
     await this.database.query(
       `INSERT INTO sessions (
          id, human_identity_id, created_at, last_accessed_at,
-         expires_at, status
+         expires_at, status, renewal_token_hash, renewal_expires_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (id) DO UPDATE SET
          last_accessed_at = EXCLUDED.last_accessed_at,
-         status = EXCLUDED.status`,
+         status = EXCLUDED.status,
+         renewal_token_hash = EXCLUDED.renewal_token_hash,
+         renewal_expires_at = EXCLUDED.renewal_expires_at`,
       [
         snapshot.id.value,
         snapshot.humanIdentityId.value,
@@ -37,6 +41,8 @@ export class PostgresSessionRepository implements SessionRepository {
         snapshot.lastAccessedAt,
         snapshot.expiresAt,
         snapshot.status,
+        snapshot.renewalTokenHash,
+        snapshot.renewalExpiresAt,
       ],
     );
   }
@@ -53,6 +59,14 @@ export class PostgresSessionRepository implements SessionRepository {
     const result = await this.database.query<SessionRow>(
       `${selectSession} WHERE id = $1 AND status = 'active'`,
       [id.value],
+    );
+    return toSession(result.rows[0]);
+  }
+
+  async findByRenewalTokenHashForUpdate(hash: string): Promise<Session | null> {
+    const result = await this.database.query<SessionRow>(
+      `${selectSession} WHERE renewal_token_hash = $1 FOR UPDATE`,
+      [hash],
     );
     return toSession(result.rows[0]);
   }
@@ -81,7 +95,7 @@ export class PostgresSessionRepository implements SessionRepository {
 
 const selectSession = `
   SELECT id, human_identity_id, created_at, last_accessed_at,
-         expires_at, status
+         expires_at, status, renewal_token_hash, renewal_expires_at
   FROM sessions
 `;
 
@@ -95,5 +109,7 @@ function toSession(row: SessionRow | undefined): Session | null {
         lastAccessedAt: row.last_accessed_at,
         expiresAt: row.expires_at,
         status: row.status,
+        renewalTokenHash: row.renewal_token_hash,
+        renewalExpiresAt: row.renewal_expires_at,
       });
 }

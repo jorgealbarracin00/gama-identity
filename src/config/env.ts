@@ -18,6 +18,11 @@ const environmentSchema = z.object({
     .int()
     .min(60)
     .default(86_400),
+  SESSION_RENEWAL_DURATION_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(300)
+    .default(2_592_000),
   REPOSITORY_MODE: z.enum(["memory", "postgres"]).default("memory"),
   DATABASE_URL: z.string().url().optional(),
   DATABASE_SSL: z.enum(["disable", "require"]).default("disable"),
@@ -31,6 +36,13 @@ const environmentSchema = z.object({
     return clientIds;
   }),
 }).superRefine((environment, context) => {
+  if (environment.SESSION_RENEWAL_DURATION_SECONDS <= environment.SESSION_DURATION_SECONDS) {
+    context.addIssue({
+      code: "custom",
+      path: ["SESSION_RENEWAL_DURATION_SECONDS"],
+      message: "SESSION_RENEWAL_DURATION_SECONDS must exceed SESSION_DURATION_SECONDS",
+    });
+  }
   if (
     environment.REPOSITORY_MODE === "postgres" &&
     environment.DATABASE_URL === undefined

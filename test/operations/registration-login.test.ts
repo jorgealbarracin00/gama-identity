@@ -44,6 +44,8 @@ describe("registration and login orchestration", () => {
       "expiresAt",
       "humanIdentityId",
       "lastAccessedAt",
+      "renewalExpiresAt",
+      "renewalToken",
       "sessionId",
     ]);
   });
