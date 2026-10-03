@@ -40,6 +40,18 @@ const environmentSchema = z.object({
   APPLE_TEAM_ID: z.string().regex(/^[A-Z0-9]{10}$/u).optional(),
   APPLE_KEY_ID: z.string().regex(/^[A-Z0-9]{10}$/u).optional(),
   APPLE_PRIVATE_KEY: z.string().min(1).optional(),
+  GOOGLE_CLIENT_IDS: z.string().optional().transform((value, context) => {
+    if (value === undefined) return [];
+    const clientIds = [...new Set(value.split(",").map((entry) => entry.trim()).filter(Boolean))];
+    if (clientIds.length === 0) {
+      context.addIssue({ code: "custom", message: "GOOGLE_CLIENT_IDS must contain at least one client identifier" });
+      return z.NEVER;
+    }
+    return clientIds;
+  }),
+  GOOGLE_WEB_CLIENT_ID: z.string().trim().min(1).optional(),
+  GOOGLE_WEB_CLIENT_SECRET: z.string().min(1).optional(),
+  GOOGLE_WEB_REDIRECT_URI: z.string().url().startsWith("https://").optional(),
 }).superRefine((environment, context) => {
   if (environment.SESSION_RENEWAL_DURATION_SECONDS <= environment.SESSION_DURATION_SECONDS) {
     context.addIssue({
@@ -81,6 +93,29 @@ const environmentSchema = z.object({
       code: "custom",
       path: ["APPLE_CLIENT_IDS"],
       message: "APPLE_CLIENT_IDS must include APPLE_WEB_CLIENT_ID",
+    });
+  }
+  const googleWebValues = [
+    environment.GOOGLE_WEB_CLIENT_ID,
+    environment.GOOGLE_WEB_CLIENT_SECRET,
+    environment.GOOGLE_WEB_REDIRECT_URI,
+  ];
+  const configuredGoogleWebValues = googleWebValues.filter((value) => value !== undefined).length;
+  if (configuredGoogleWebValues !== 0 && configuredGoogleWebValues !== googleWebValues.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["GOOGLE_WEB_CLIENT_ID"],
+      message: "Google web authentication must be configured completely",
+    });
+  }
+  if (
+    environment.GOOGLE_WEB_CLIENT_ID !== undefined &&
+    !environment.GOOGLE_CLIENT_IDS.includes(environment.GOOGLE_WEB_CLIENT_ID)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["GOOGLE_CLIENT_IDS"],
+      message: "GOOGLE_CLIENT_IDS must include GOOGLE_WEB_CLIENT_ID",
     });
   }
 });

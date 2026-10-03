@@ -38,7 +38,10 @@ describe("Apple web authorization-code exchange", () => {
       },
     });
 
-    assert.equal(await exchanger.exchange("single-use-code"), "signed-apple-identity-token");
+    assert.equal(
+      await exchanger.exchange({ authorizationCode: "single-use-code" }),
+      "signed-apple-identity-token",
+    );
     const form = new URLSearchParams(sentBody);
     assert.equal(form.get("client_id"), clientId);
     assert.equal(form.get("code"), "single-use-code");
@@ -65,7 +68,7 @@ describe("Apple web authorization-code exchange", () => {
       request: async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
     });
     await assert.rejects(
-      rejected.exchange("expired-code"),
+      rejected.exchange({ authorizationCode: "expired-code" }),
       (error: unknown) => error instanceof AppleAuthorizationCodeExchangeError && error.code === "AUTHORIZATION_CODE_REJECTED",
     );
 
@@ -74,7 +77,7 @@ describe("Apple web authorization-code exchange", () => {
       request: async () => new Response(JSON.stringify({ error: "invalid_client" }), { status: 400 }),
     });
     await assert.rejects(
-      unavailable.exchange("valid-shape-code"),
+      unavailable.exchange({ authorizationCode: "valid-shape-code" }),
       (error: unknown) => error instanceof AppleAuthorizationCodeExchangeError && error.code === "TOKEN_EXCHANGE_UNAVAILABLE",
     );
   });

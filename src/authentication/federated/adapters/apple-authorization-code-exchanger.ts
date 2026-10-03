@@ -3,6 +3,7 @@ import { importPKCS8, SignJWT, type CryptoKey } from "jose";
 import type { Clock } from "../../../shared/clock.js";
 import { SystemClock } from "../../../shared/clock.js";
 import type { AppleAuthorizationCodeExchanger } from "../ports/apple-authorization-code-exchanger.js";
+import type { WebAuthorizationCodeExchangeInput } from "../ports/web-authorization-code-exchanger.js";
 
 const appleTokenEndpoint = "https://appleid.apple.com/auth/token";
 const appleAudience = "https://appleid.apple.com";
@@ -42,7 +43,8 @@ export class AppleWebAuthorizationCodeExchanger implements AppleAuthorizationCod
     this.clock = options.clock ?? new SystemClock();
   }
 
-  async exchange(authorizationCode: string): Promise<string> {
+  async exchange(input: WebAuthorizationCodeExchangeInput): Promise<string> {
+    const { authorizationCode } = input;
     if (
       authorizationCode.length === 0 ||
       authorizationCode.length > maximumAuthorizationCodeLength ||

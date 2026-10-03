@@ -4,6 +4,8 @@ import { describe, it } from "node:test";
 import { buildApp } from "../../src/api/app.js";
 import { buildTestServices } from "../operational/test-doubles.js";
 import { AuthenticateAppleWeb } from "../../src/authentication/federated/application/authenticate-apple-web.js";
+import { AuthenticateGoogleWeb } from "../../src/authentication/federated/application/authenticate-google-web.js";
+import { GoogleAuthorizationCodeExchangeError } from "../../src/authentication/federated/adapters/google-authorization-code-exchanger.js";
 
 const nonce = "route_nonce_that_is_at_least_thirty_two_characters_123";
 
@@ -66,7 +68,7 @@ describe("federated identity HTTP boundary", () => {
 
     const unsupported = await app.inject({
       method: "POST",
-      url: "/authentication/federated/google",
+      url: "/authentication/federated/microsoft",
       payload: { identityToken: "unused-token", nonce },
     });
     assert.equal(unsupported.statusCode, 400);
@@ -83,8 +85,8 @@ describe("federated identity HTTP boundary", () => {
       emailPrivate: true,
     });
     const authorizationCodes = {
-      async exchange(code: string) {
-        assert.equal(code, "single-use-web-code");
+      async exchange(input: { authorizationCode: string }) {
+        assert.equal(input.authorizationCode, "single-use-web-code");
         return "web-identity-token";
       },
     };
@@ -117,6 +119,91 @@ describe("federated identity HTTP boundary", () => {
     });
     assert.equal(response.statusCode, 503);
     assert.equal(response.json().error.code, "APPLE_WEB_AUTHENTICATION_UNAVAILABLE");
+    await app.close();
+  });
+
+  it("exchanges a Google web code with PKCE into the ordinary GAMA session envelope", async () => {
+    const fixture = buildTestServices();
+    fixture.googleVerifier.accept("google-identity-token", {
+      subject: "google-subject",
+      email: "person@example.com",
+      emailVerified: true,
+    });
+    const authorizationCodes = {
+      async exchange(input: { authorizationCode: string; codeVerifier?: string }) {
+        assert.equal(input.authorizationCode, "single-use-google-code");
+        assert.equal(input.codeVerifier, "a".repeat(43));
+        return "google-identity-token";
+      },
+    };
+    const app = buildApp({
+      ...fixture.services,
+      authenticateGoogleWeb: new AuthenticateGoogleWeb(
+        authorizationCodes,
+        fixture.services.authenticateFederated,
+      ),
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/authentication/federated/google/web",
+      payload: {
+        authorizationCode: "single-use-google-code",
+        nonce,
+        codeVerifier: "a".repeat(43),
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().session.humanIdentityId, "identity-1");
+    assert.equal(response.json().account.email, "person@example.com");
+    assert.equal(response.body.includes("single-use-google-code"), false);
+    assert.equal(response.body.includes("a".repeat(43)), false);
+    await app.close();
+  });
+
+  it("keeps Google web authentication unavailable unless server credentials are configured", async () => {
+    const fixture = buildTestServices();
+    const app = buildApp(fixture.services);
+    const response = await app.inject({
+      method: "POST",
+      url: "/authentication/federated/google/web",
+      payload: {
+        authorizationCode: "unused-code",
+        nonce,
+        codeVerifier: "b".repeat(43),
+      },
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().error.code, "GOOGLE_WEB_AUTHENTICATION_UNAVAILABLE");
+    await app.close();
+  });
+
+  it("sanitizes rejected Google authorization-code errors", async () => {
+    const fixture = buildTestServices();
+    const authorizationCodes = {
+      async exchange() {
+        throw new GoogleAuthorizationCodeExchangeError("AUTHORIZATION_CODE_REJECTED");
+      },
+    };
+    const app = buildApp({
+      ...fixture.services,
+      authenticateGoogleWeb: new AuthenticateGoogleWeb(
+        authorizationCodes,
+        fixture.services.authenticateFederated,
+      ),
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/authentication/federated/google/web",
+      payload: {
+        authorizationCode: "sensitive-google-code",
+        nonce,
+        codeVerifier: "c".repeat(43),
+      },
+    });
+    assert.equal(response.statusCode, 401);
+    assert.equal(response.json().error.code, "GOOGLE_AUTHORIZATION_CODE_INVALID");
+    assert.equal(response.body.includes("sensitive-google-code"), false);
+    assert.equal(response.body.includes("c".repeat(43)), false);
     await app.close();
   });
 });

@@ -98,9 +98,13 @@ export class FederatedIdentityIds implements FederatedIdentityIdGenerator {
   }
 }
 
-export class DeterministicAppleVerifier implements FederatedIdentityTokenVerifier {
-  readonly provider = FederatedIdentityProvider.from("apple");
+export class DeterministicFederatedVerifier implements FederatedIdentityTokenVerifier {
+  readonly provider: FederatedIdentityProvider;
   private readonly credentials = new Map<string, Omit<VerifiedFederatedCredential, "provider" | "nonceHash">>();
+
+  constructor(provider: string) {
+    this.provider = FederatedIdentityProvider.from(provider);
+  }
 
   accept(
     identityToken: string,
@@ -134,6 +138,14 @@ export class DeterministicAppleVerifier implements FederatedIdentityTokenVerifie
   }
 }
 
+export class DeterministicAppleVerifier extends DeterministicFederatedVerifier {
+  constructor() { super("apple"); }
+}
+
+export class DeterministicGoogleVerifier extends DeterministicFederatedVerifier {
+  constructor() { super("google"); }
+}
+
 export class DeterministicPasswords
   implements PasswordHasher, PasswordVerifier
 {
@@ -158,6 +170,7 @@ export function buildTestServices(): {
   federatedIdentities: InMemoryFederatedIdentityRepository;
   federatedNonces: InMemoryFederatedAuthenticationNonceRepository;
   appleVerifier: DeterministicAppleVerifier;
+  googleVerifier: DeterministicGoogleVerifier;
   controlPlaneRepository: InMemoryControlPlaneRepository;
   workforceAdministration: WorkforceAdministration;
   platformAdministrationProvisioning: PlatformAdministrationProvisioning;
@@ -169,6 +182,7 @@ export function buildTestServices(): {
   const federatedIdentities = new InMemoryFederatedIdentityRepository();
   const federatedNonces = new InMemoryFederatedAuthenticationNonceRepository();
   const appleVerifier = new DeterministicAppleVerifier();
+  const googleVerifier = new DeterministicGoogleVerifier();
   const serial = new SerialExecutor();
   const passwords = new DeterministicPasswords();
   const identityIds = new IdentityIds();
@@ -198,7 +212,7 @@ export function buildTestServices(): {
     renewalTokens,
     86_400,
   );
-  const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier]);
+  const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier, googleVerifier]);
   const authenticateFederated = new AuthenticateFederated(
     federatedVerifiers,
     federatedIdentities,
@@ -219,7 +233,7 @@ export function buildTestServices(): {
   );
   const controlPlaneRepository = new InMemoryControlPlaneRepository();
   const federatedAuthenticationMethods = new ManageFederatedAuthenticationMethods(
-    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    new FederatedIdentityTokenVerifiers([appleVerifier, googleVerifier]),
     federatedIdentities,
     federatedNonces,
     identities,
@@ -300,6 +314,7 @@ export function buildTestServices(): {
     federatedIdentities,
     federatedNonces,
     appleVerifier,
+    googleVerifier,
     controlPlaneRepository,
     workforceAdministration,
     platformAdministrationProvisioning,

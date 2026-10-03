@@ -103,7 +103,7 @@ describe("provider-neutral federated identity resolution", () => {
     const fixture = buildTestServices();
     await assert.rejects(
       fixture.services.resolveFederatedIdentity.execute({
-        provider: "google",
+        provider: "microsoft",
         identityToken: "unused-token",
         nonce: nonce("unsupported"),
       }),

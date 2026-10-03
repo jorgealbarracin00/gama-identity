@@ -173,24 +173,85 @@ describe("provider-neutral federated authentication", () => {
     assert.notEqual(other.humanIdentityId, first.humanIdentityId.value);
   });
 
-  it("can persist a future Google relationship while Google authentication stays unsupported", async () => {
+  it("creates one Human, one Google FederatedIdentity and one ordinary GAMA session", async () => {
     const fixture = buildTestServices();
-    const google = FederatedIdentity.create(
-      new FederatedIdentityIds(),
-      HumanIdentityId.from("future-human"),
-      FederatedIdentityProvider.from("google"),
-      FederatedProviderSubject.from("google-subject"),
-      { email: "future@example.com", emailVerified: true, emailPrivate: false },
-      fixture.clock,
+    fixture.googleVerifier.accept("google-token", {
+      subject: "google-subject",
+      email: "person@example.com",
+      emailVerified: true,
+    });
+    const result = await fixture.services.authenticateFederated.execute({
+      provider: "google",
+      identityToken: "google-token",
+      nonce: nonceA,
+    });
+    assert.equal(result.created, true);
+    assert.equal(result.humanIdentityId, "identity-1");
+    assert.equal(result.providerEmail, "person@example.com");
+    assert.equal(fixture.federatedIdentities.count, 1);
+    assert.equal(
+      (await fixture.sessions.findById(SessionId.from(result.session.sessionId)))?.humanIdentityId.value,
+      "identity-1",
     );
-    await fixture.federatedIdentities.save(google);
-    assert.equal((await fixture.federatedIdentities.findByProviderSubject(
+    const stored = await fixture.federatedIdentities.findByProviderSubject(
       FederatedIdentityProvider.from("google"),
       FederatedProviderSubject.from("google-subject"),
-    ))?.id.value, google.id.value);
+    );
+    assert.equal(stored?.providerEmailVerified, true);
+    assert.equal(stored?.providerEmailPrivate, null);
+  });
+
+  it("returns the same Human for a returning Google subject", async () => {
+    const fixture = buildTestServices();
+    fixture.googleVerifier.accept("google-first", { subject: "google-subject", email: "person@example.com" });
+    fixture.googleVerifier.accept("google-returning", { subject: "google-subject" });
+    const first = await fixture.services.authenticateFederated.execute({ provider: "google", identityToken: "google-first", nonce: nonceA });
+    const returning = await fixture.services.authenticateFederated.execute({ provider: "google", identityToken: "google-returning", nonce: nonceB });
+    assert.equal(first.humanIdentityId, returning.humanIdentityId);
+    assert.equal(returning.created, false);
+    assert.equal(returning.providerEmail, "person@example.com");
+    assert.equal(fixture.federatedIdentities.count, 1);
+    assert.notEqual(first.session.sessionId, returning.session.sessionId);
+  });
+
+  it("never merges different Google subjects that present the same email", async () => {
+    const fixture = buildTestServices();
+    fixture.googleVerifier.accept("google-one", { subject: "google-subject-one", email: "same@example.com", emailVerified: true });
+    fixture.googleVerifier.accept("google-two", { subject: "google-subject-two", email: "same@example.com", emailVerified: true });
+    const first = await fixture.services.authenticateFederated.execute({ provider: "google", identityToken: "google-one", nonce: nonceA });
+    const second = await fixture.services.authenticateFederated.execute({ provider: "google", identityToken: "google-two", nonce: nonceB });
+    assert.notEqual(first.humanIdentityId, second.humanIdentityId);
+    assert.equal(fixture.federatedIdentities.count, 2);
+  });
+
+  it("never merges a Google subject into a password account by matching email", async () => {
+    const fixture = buildTestServices();
+    const passwordAccount = await fixture.services.register.execute({
+      email: "person@example.com",
+      password: "correct-password",
+    });
+    fixture.googleVerifier.accept("google-token", { subject: "google-subject", email: "person@example.com", emailVerified: true });
+    const google = await fixture.services.authenticateFederated.execute({ provider: "google", identityToken: "google-token", nonce: nonceA });
+    assert.notEqual(google.humanIdentityId, passwordAccount.humanIdentityId);
+  });
+
+  it("never merges a Google subject into an Apple identity by matching email", async () => {
+    const fixture = buildTestServices();
+    fixture.appleVerifier.accept("apple-token", { subject: "apple-subject", email: "same@example.com", emailVerified: true });
+    fixture.googleVerifier.accept("google-token", { subject: "google-subject", email: "same@example.com", emailVerified: true });
+    const apple = await fixture.services.authenticateFederated.execute({ provider: "apple", identityToken: "apple-token", nonce: nonceA });
+    const google = await fixture.services.authenticateFederated.execute({ provider: "google", identityToken: "google-token", nonce: nonceB });
+    assert.notEqual(google.humanIdentityId, apple.humanIdentityId);
+    assert.equal(fixture.federatedIdentities.count, 2);
+  });
+
+  it("rejects Google nonce replay", async () => {
+    const fixture = buildTestServices();
+    fixture.googleVerifier.accept("google-token", { subject: "google-subject" });
+    await fixture.services.authenticateFederated.execute({ provider: "google", identityToken: "google-token", nonce: nonceA });
     await assert.rejects(
-      fixture.services.authenticateFederated.execute({ provider: "google", identityToken: "unused", nonce: nonceA }),
-      (error: unknown) => error instanceof FederatedAuthenticationError && error.code === "PROVIDER_UNSUPPORTED",
+      fixture.services.authenticateFederated.execute({ provider: "google", identityToken: "google-token", nonce: nonceA }),
+      (error: unknown) => error instanceof FederatedAuthenticationError && error.code === "CREDENTIAL_REPLAYED",
     );
   });
 });

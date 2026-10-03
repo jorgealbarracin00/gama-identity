@@ -168,7 +168,7 @@ describe("federated identity resolve-only HTTP boundary", () => {
 
     const unsupported = await app.inject({
       method: "POST",
-      url: "/authentication/federated/google/resolve",
+      url: "/authentication/federated/microsoft/resolve",
       payload: { identityToken: "unused-token", nonce: nonce("unsupported") },
     });
     assert.equal(unsupported.statusCode, 400);

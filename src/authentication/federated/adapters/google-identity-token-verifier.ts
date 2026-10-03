@@ -6,11 +6,6 @@ import {
 
 import type { Clock } from "../../../shared/clock.js";
 import { SystemClock } from "../../../shared/clock.js";
-import {
-  FederatedIdentityProvider,
-  FederatedProviderSubject,
-  type FederatedProviderMetadata,
-} from "../domain/federated-identity.js";
 import { FederatedAuthenticationError } from "../application/errors.js";
 import type {
   FederatedCredentialInput,
@@ -18,35 +13,40 @@ import type {
   VerifiedFederatedCredential,
 } from "../application/token-verifier.js";
 import {
+  FederatedIdentityProvider,
+  FederatedProviderSubject,
+  type FederatedProviderMetadata,
+} from "../domain/federated-identity.js";
+import {
   constantTimeEqual,
   sha256Base64Url,
   translateOidcJoseError,
 } from "./oidc-verification.js";
 
-const appleIssuer = "https://appleid.apple.com";
-const appleKeysURL = new URL("https://appleid.apple.com/auth/keys");
-const appleProvider = FederatedIdentityProvider.from("apple");
+const googleIssuers = ["https://accounts.google.com", "accounts.google.com"];
+const googleKeysURL = new URL("https://www.googleapis.com/oauth2/v3/certs");
+const googleProvider = FederatedIdentityProvider.from("google");
 const maximumIdentityTokenLength = 16_384;
-const rawNoncePattern = /^[A-Za-z0-9_-]{32,256}$/;
+const rawNoncePattern = /^[A-Za-z0-9_-]{32,256}$/u;
 
-export interface AppleIdentityTokenVerifierOptions {
+export interface GoogleIdentityTokenVerifierOptions {
   readonly clientIds: readonly string[];
   readonly keyResolver?: JWTVerifyGetKey;
   readonly clock?: Clock;
 }
 
-export class AppleIdentityTokenVerifier implements FederatedIdentityTokenVerifier {
-  readonly provider = appleProvider;
+export class GoogleIdentityTokenVerifier implements FederatedIdentityTokenVerifier {
+  readonly provider = googleProvider;
   private readonly clientIds: string[];
   private readonly keyResolver: JWTVerifyGetKey;
   private readonly clock: Clock;
 
-  constructor(options: AppleIdentityTokenVerifierOptions) {
+  constructor(options: GoogleIdentityTokenVerifierOptions) {
     if (options.clientIds.length === 0 || options.clientIds.some((clientId) => clientId.trim().length === 0)) {
-      throw new Error("At least one Apple client identifier is required");
+      throw new Error("At least one Google client identifier is required");
     }
     this.clientIds = [...new Set(options.clientIds)];
-    this.keyResolver = options.keyResolver ?? createRemoteJWKSet(appleKeysURL);
+    this.keyResolver = options.keyResolver ?? createRemoteJWKSet(googleKeysURL);
     this.clock = options.clock ?? new SystemClock();
   }
 
@@ -59,17 +59,16 @@ export class AppleIdentityTokenVerifier implements FederatedIdentityTokenVerifie
       throw new FederatedAuthenticationError("MALFORMED_CREDENTIAL");
     }
 
-    const nonceHash = sha256Base64Url(input.nonce);
     try {
       const { payload } = await jwtVerify(input.identityToken, this.keyResolver, {
         algorithms: ["RS256"],
-        issuer: appleIssuer,
+        issuer: googleIssuers,
         audience: this.clientIds,
         requiredClaims: ["sub", "iat", "exp", "nonce"],
         currentDate: this.clock.now(),
         clockTolerance: 5,
       });
-      if (typeof payload.nonce !== "string" || !constantTimeEqual(payload.nonce, nonceHash)) {
+      if (typeof payload.nonce !== "string" || !constantTimeEqual(payload.nonce, input.nonce)) {
         throw new FederatedAuthenticationError("NONCE_MISMATCH");
       }
       if (typeof payload.sub !== "string" || typeof payload.exp !== "number") {
@@ -82,13 +81,12 @@ export class AppleIdentityTokenVerifier implements FederatedIdentityTokenVerifie
       } catch {
         throw new FederatedAuthenticationError("MALFORMED_CREDENTIAL");
       }
-      const metadata = appleMetadata(payload);
       return {
         provider: this.provider,
         providerSubject,
-        metadata,
-        nonceHash,
-        expiresAt: new Date(payload.exp * 1000),
+        metadata: googleMetadata(payload),
+        nonceHash: sha256Base64Url(input.nonce),
+        expiresAt: new Date(payload.exp * 1_000),
       };
     } catch (error) {
       if (error instanceof FederatedAuthenticationError) throw error;
@@ -97,23 +95,20 @@ export class AppleIdentityTokenVerifier implements FederatedIdentityTokenVerifie
   }
 }
 
-function appleMetadata(payload: Record<string, unknown>): FederatedProviderMetadata {
+function googleMetadata(payload: Record<string, unknown>): FederatedProviderMetadata {
   const email = payload.email;
+  const emailVerified = payload.email_verified;
   if (email !== undefined && (typeof email !== "string" || email.length === 0 || email.length > 320)) {
+    throw new FederatedAuthenticationError("MALFORMED_CREDENTIAL");
+  }
+  if (emailVerified !== undefined && typeof emailVerified !== "boolean") {
     throw new FederatedAuthenticationError("MALFORMED_CREDENTIAL");
   }
   return {
     email: typeof email === "string" ? email : null,
-    emailVerified: booleanClaim(payload.email_verified),
-    emailPrivate: booleanClaim(payload.is_private_email),
+    emailVerified: typeof emailVerified === "boolean" ? emailVerified : null,
+    emailPrivate: null,
   };
 }
 
-function booleanClaim(value: unknown): boolean | null {
-  if (value === undefined) return null;
-  if (value === true || value === "true") return true;
-  if (value === false || value === "false") return false;
-  throw new FederatedAuthenticationError("MALFORMED_CREDENTIAL");
-}
-
-export const APPLE_FEDERATED_PROVIDER = appleProvider;
+export const GOOGLE_FEDERATED_PROVIDER = googleProvider;

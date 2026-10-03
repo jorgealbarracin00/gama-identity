@@ -1,12 +1,15 @@
 import { Argon2PasswordOperations } from "../authentication/adapters/argon2-password-operations.js";
 import { AppleIdentityTokenVerifier, APPLE_FEDERATED_PROVIDER } from "../authentication/federated/adapters/apple-identity-token-verifier.js";
 import { AppleWebAuthorizationCodeExchanger } from "../authentication/federated/adapters/apple-authorization-code-exchanger.js";
+import { GoogleWebAuthorizationCodeExchanger } from "../authentication/federated/adapters/google-authorization-code-exchanger.js";
+import { GoogleIdentityTokenVerifier, GOOGLE_FEDERATED_PROVIDER } from "../authentication/federated/adapters/google-identity-token-verifier.js";
 import {
   InMemoryFederatedAuthenticationNonceRepository,
   InMemoryFederatedIdentityRepository,
 } from "../authentication/federated/adapters/in-memory-federated-identity-repository.js";
 import { AuthenticateFederated } from "../authentication/federated/application/authenticate-federated.js";
 import { AuthenticateAppleWeb } from "../authentication/federated/application/authenticate-apple-web.js";
+import { AuthenticateGoogleWeb } from "../authentication/federated/application/authenticate-google-web.js";
 import { ManageFederatedAuthenticationMethods } from "../authentication/federated/application/manage-federated-authentication-methods.js";
 import { ResolveFederatedIdentity } from "../authentication/federated/application/resolve-federated-identity.js";
 import {
@@ -83,6 +86,7 @@ export interface IdentityServices {
   readonly login: Login;
   readonly authenticateFederated: AuthenticateFederated;
   readonly authenticateAppleWeb?: AuthenticateAppleWeb;
+  readonly authenticateGoogleWeb?: AuthenticateGoogleWeb;
   readonly resolveFederatedIdentity: ResolveFederatedIdentity;
   readonly federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   readonly logout: Logout;
@@ -312,6 +316,7 @@ function composeServices(
   login: Login;
   authenticateFederated: AuthenticateFederated;
   authenticateAppleWeb?: AuthenticateAppleWeb;
+  authenticateGoogleWeb?: AuthenticateGoogleWeb;
   resolveFederatedIdentity: ResolveFederatedIdentity;
   federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   logout: Logout;
@@ -349,7 +354,10 @@ function composeServices(
   const appleVerifier = runtimeConfig.APPLE_CLIENT_IDS.length === 0
     ? new UnavailableFederatedIdentityTokenVerifier(APPLE_FEDERATED_PROVIDER)
     : new AppleIdentityTokenVerifier({ clientIds: runtimeConfig.APPLE_CLIENT_IDS });
-  const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier]);
+  const googleVerifier = runtimeConfig.GOOGLE_CLIENT_IDS.length === 0
+    ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER)
+    : new GoogleIdentityTokenVerifier({ clientIds: runtimeConfig.GOOGLE_CLIENT_IDS });
+  const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier, googleVerifier]);
   const authenticateFederated = new AuthenticateFederated(
     federatedVerifiers,
     federatedIdentities,
@@ -366,6 +374,13 @@ function composeServices(
     ? undefined
     : new AuthenticateAppleWeb(
       new AppleWebAuthorizationCodeExchanger(appleWebConfig),
+      authenticateFederated,
+    );
+  const googleWebConfig = googleWebConfiguration(runtimeConfig);
+  const authenticateGoogleWeb = googleWebConfig === null
+    ? undefined
+    : new AuthenticateGoogleWeb(
+      new GoogleWebAuthorizationCodeExchanger(googleWebConfig),
       authenticateFederated,
     );
   const resolveFederatedIdentity = new ResolveFederatedIdentity(
@@ -399,11 +414,31 @@ function composeServices(
     login: new Login(authenticate, createSession),
     authenticateFederated,
     ...(authenticateAppleWeb === undefined ? {} : { authenticateAppleWeb }),
+    ...(authenticateGoogleWeb === undefined ? {} : { authenticateGoogleWeb }),
     resolveFederatedIdentity,
     federatedAuthenticationMethods,
     logout: new Logout(sessions),
     renewSession: new RenewSession(sessions, createSession, renewalTokens, clock, atomically),
     validateSession: new ValidateSession(sessions, clock),
+  };
+}
+
+function googleWebConfiguration(runtimeConfig: Config): {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+} | null {
+  if (
+    runtimeConfig.GOOGLE_WEB_CLIENT_ID === undefined ||
+    runtimeConfig.GOOGLE_WEB_CLIENT_SECRET === undefined ||
+    runtimeConfig.GOOGLE_WEB_REDIRECT_URI === undefined
+  ) {
+    return null;
+  }
+  return {
+    clientId: runtimeConfig.GOOGLE_WEB_CLIENT_ID,
+    clientSecret: runtimeConfig.GOOGLE_WEB_CLIENT_SECRET,
+    redirectUri: runtimeConfig.GOOGLE_WEB_REDIRECT_URI,
   };
 }
 

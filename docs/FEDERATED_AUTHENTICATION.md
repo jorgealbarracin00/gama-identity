@@ -42,9 +42,9 @@ relationships. A provider account can never be reassigned to another Human by
 retiring and recreating a row. Provider email is not unique, is not an identity
 key, and is never converted into an `EmailCredential`.
 
-The schema and repository accept a future `provider = google` relationship.
-Authentication succeeds only when a verifier is registered for that provider;
-this release registers Apple only.
+The schema and repository accept provider-neutral relationships. This release
+registers Apple and Google verifiers; every other provider fails closed until a
+verifier is explicitly composed.
 
 Apple web authentication extends the same boundary. The browser receives a
 single-use authorization code for a Services ID associated with Coco
@@ -52,6 +52,13 @@ Companion's primary App ID. GAMA exchanges the code directly with Apple using
 server-held credentials, verifies the resulting identity token, and enters the
 same provider-subject mapping and session-creation path used by the native app.
 No browser-supplied subject or email is trusted.
+
+Google web authentication uses OpenID Connect Authorization Code flow with PKCE
+S256. Coco sends Google the raw OIDC nonce and PKCE code challenge, retains the
+raw nonce and verifier only in secure HttpOnly cookies, and sends the returned
+single-use code, nonce and verifier to GAMA. GAMA exchanges the code directly
+with Google's token endpoint using its server-held client secret, verifies the
+identity token, and enters the same provider-subject and session path.
 
 ## Sign in with Apple verification
 
@@ -85,6 +92,21 @@ atomically inserts `(provider, nonceHash)` into
 including under concurrent requests. The raw nonce and identity token are never
 persisted or deliberately logged.
 
+For Google web sign-in, the identity token carries the raw nonce as required by
+OpenID Connect. GAMA compares it in constant time, then hashes it for the same
+provider-scoped, single-use replay ledger. Apple and Google nonce records cannot
+collide because provider is part of the ledger key.
+
+## Sign in with Google verification
+
+GAMA verifies Google identity tokens against Google's rotating public keys at
+`https://www.googleapis.com/oauth2/v3/certs`. Verification requires RS256, one
+of Google's documented issuers (`https://accounts.google.com` or the legacy
+`accounts.google.com`), an audience in `GOOGLE_CLIENT_IDS`, required subject,
+issued-at, expiration and nonce claims, and expiration with only a five-second
+clock tolerance. The stable Google `sub` claim is the provider subject. Google
+email and `email_verified` are optional metadata and are never identity keys.
+
 ## First and returning sign-in
 
 After verification, GAMA resolves only `(provider, providerSubject)`.
@@ -116,16 +138,17 @@ change a relationship, infer identity from email, or alter Tenant/Product
 authority. The replay ledger entry for a successfully verified nonce is its sole
 persistent write.
 
-## Apple email and explicit account linking
+## Provider email and explicit account linking
 
 The optional signed Apple `email`, `email_verified`, and `is_private_email`
 claims are stored only as provider metadata. A private relay address is retained
 with `provider_email_private = true`. Missing email on a returning sign-in does
 not erase metadata captured earlier.
 
-If an unknown Apple subject carries an email matching an existing password
-account, ordinary Apple sign-in still creates a new Human Identity. Email equality
-never changes ownership.
+If an unknown Apple or Google subject carries an email matching an existing
+password or federated account, ordinary sign-in still creates a new Human
+Identity. Two different Google subjects with the same email also remain separate.
+Email equality never changes ownership.
 
 Linking is a separate explicit ceremony. The caller supplies an ordinary GAMA
 bearer session plus a fresh provider token and nonce. The session determines the
@@ -199,6 +222,23 @@ token endpoint using the configured Services ID and exact return URI, and then
 performs the same issuer, audience, signature, expiry, nonce, replay, identity,
 and session checks as native authentication.
 
+Google web sign-in uses:
+
+```http
+POST /authentication/federated/google/web
+Content-Type: application/json
+
+{
+  "authorizationCode": "<single-use Google code>",
+  "nonce": "<raw one-time OIDC nonce>",
+  "codeVerifier": "<RFC 7636 PKCE verifier>"
+}
+```
+
+GAMA exchanges the code at `https://oauth2.googleapis.com/token` using the
+server-only client secret and exact redirect URI. It returns or persists neither
+the access token nor refresh credentials and requests no offline access.
+
 Resolve-only discovery accepts the same strict credential body:
 
 ```http
@@ -234,6 +274,8 @@ Public error codes are deliberately sanitized:
 - `FEDERATED_AUTHENTICATION_UNAVAILABLE`
 - `APPLE_AUTHORIZATION_CODE_INVALID`
 - `APPLE_WEB_AUTHENTICATION_UNAVAILABLE`
+- `GOOGLE_AUTHORIZATION_CODE_INVALID`
+- `GOOGLE_WEB_AUTHENTICATION_UNAVAILABLE`
 - `FEDERATED_IDENTITY_CONFLICT`
 - `FEDERATED_VERIFICATION_UNAVAILABLE`
 - `SESSION_INVALID`, `SESSION_EXPIRED`, `SESSION_REVOKED`
@@ -277,6 +319,14 @@ When `APPLE_CLIENT_IDS` is absent, existing email/password operation and service
 startup remain available, while Apple exchange fails closed with
 `FEDERATED_VERIFICATION_UNAVAILABLE`.
 
+`GOOGLE_CLIENT_IDS` is the comma-separated Google OAuth client ID audience
+allowlist. Web exchange requires all of `GOOGLE_WEB_CLIENT_ID`,
+`GOOGLE_WEB_CLIENT_SECRET`, and `GOOGLE_WEB_REDIRECT_URI`; the web client ID must
+also appear in `GOOGLE_CLIENT_IDS`. The client secret belongs only in GAMA's
+server runtime. Coco receives the public client ID and exact callback URL, never
+the secret. When Google configuration is absent, Apple and email/password remain
+available while Google fails closed.
+
 ## Persistence and migration
 
 Migration `006_federated_identities.sql` is forward-only and additive. It creates
@@ -306,11 +356,9 @@ event. Link, unlink and duplicate reconciliation append safe Platform audit
 events containing GAMA relationship/Human identifiers, provider and outcome;
 provider subject, token and nonce material are excluded.
 
-## Google extension point
+## Adding another provider
 
-Adding Google later requires a Google credential-acquisition adapter and a Google
-`FederatedIdentityTokenVerifier` registered for `provider = google`, with Google's
-issuer, audience, keys, expiration, and nonce rules. Human Identity, persistence,
-session issuance, API orchestration, account-linking policy, and authorization
-boundaries require no redesign. This release contains no Google SDK or server
-configuration.
+Another provider requires a credential-acquisition adapter and a registered
+`FederatedIdentityTokenVerifier`. Human Identity, persistence, session issuance,
+API orchestration, account-linking policy, and authorization boundaries remain
+provider-neutral and require no redesign.

@@ -9,6 +9,7 @@ import { AppError } from "../shared/errors.js";
 import { FederatedAuthenticationError } from "../authentication/federated/application/errors.js";
 import { FederatedAuthenticationMethodError } from "../authentication/federated/application/manage-federated-authentication-methods.js";
 import { AppleAuthorizationCodeExchangeError } from "../authentication/federated/adapters/apple-authorization-code-exchanger.js";
+import { GoogleAuthorizationCodeExchangeError } from "../authentication/federated/adapters/google-authorization-code-exchanger.js";
 import { SessionRenewalError } from "../sessions/application/use-cases.js";
 
 const credentialsSchema = z.object({
@@ -25,6 +26,11 @@ const federatedCredentialSchema = z.object({
 const appleWebCredentialSchema = z.object({
   authorizationCode: z.string().min(1).max(4_096),
   nonce: z.string().min(32).max(256),
+}).strict();
+const googleWebCredentialSchema = z.object({
+  authorizationCode: z.string().min(1).max(4_096),
+  nonce: z.string().min(32).max(256),
+  codeVerifier: z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/u),
 }).strict();
 const sessionRenewalSchema = z.object({
   renewalToken: z.string().min(32).max(512),
@@ -121,6 +127,47 @@ export function identityRoutes(
           throw new AppError(
             "The Apple authorization was not accepted",
             "APPLE_AUTHORIZATION_CODE_INVALID",
+            401,
+          );
+        }
+        throw translateFederatedAuthenticationError(error);
+      }
+    });
+
+    app.post("/authentication/federated/google/web", async (request, reply) => {
+      const credential = googleWebCredentialSchema.safeParse(request.body);
+      if (!credential.success) {
+        throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      }
+      if (services.authenticateGoogleWeb === undefined) {
+        throw new AppError(
+          "Google web authentication is temporarily unavailable",
+          "GOOGLE_WEB_AUTHENTICATION_UNAVAILABLE",
+          503,
+        );
+      }
+      try {
+        const result = await services.authenticateGoogleWeb.execute(credential.data);
+        return reply.send({
+          session: result.session,
+          account: { email: result.providerEmail },
+        });
+      } catch (error) {
+        if (error instanceof GoogleAuthorizationCodeExchangeError) {
+          request.log.warn(
+            { googleWebFailureCode: error.code },
+            "Google web authorization-code exchange rejected",
+          );
+          if (error.code === "TOKEN_EXCHANGE_UNAVAILABLE") {
+            throw new AppError(
+              "Google web authentication is temporarily unavailable",
+              "GOOGLE_WEB_AUTHENTICATION_UNAVAILABLE",
+              503,
+            );
+          }
+          throw new AppError(
+            "The Google authorization was not accepted",
+            "GOOGLE_AUTHORIZATION_CODE_INVALID",
             401,
           );
         }

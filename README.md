@@ -92,13 +92,14 @@ email, credential, or identity exists.
 Passwords are hashed in production with Argon2id. Tests use deterministic
 password doubles and never weaken the production adapter.
 
-Sign in with Apple is the first federated provider. GAMA verifies Apple's signed
-identity token, issuer, configured audience, expiration and nonce against Apple's
-rotating public keys, then resolves `(provider, providerSubject)`. Unknown Apple
-subjects create a new canonical Human transactionally; matching email never
-silently links an existing account. An authenticated Human may explicitly connect
-Apple by proving both its ordinary GAMA session and a fresh verified Apple
-credential. A separate resolve-only boundary can verify a provider credential
+GAMA supports Sign in with Apple and Google OpenID Connect as federated
+providers. It verifies each provider's signed identity token, issuer, configured
+audience, expiration and nonce against rotating public keys, then resolves only
+`(provider, providerSubject)`. Unknown subjects create a new canonical Human
+transactionally; matching email never silently links an existing account. An
+authenticated Human may explicitly connect a provider by proving both its
+ordinary GAMA session and a fresh verified provider credential. A separate
+resolve-only boundary can verify a provider credential
 and disclose only whether its exact provider/subject relationship already
 exists, without creating a Human, relationship, or session. See
 [`docs/FEDERATED_AUTHENTICATION.md`](docs/FEDERATED_AUTHENTICATION.md).
@@ -155,6 +156,14 @@ Accepts only an Apple identity token and its raw one-time nonce. The server
 cryptographically verifies Apple and returns the same ordinary opaque GAMA
 session contract. It does not accept a subject, email, Human Identity ID, or any
 authorization relationship from the caller.
+
+### `POST /authentication/federated/google/web`
+
+Accepts a single-use Google authorization code, its raw OIDC nonce, and an RFC
+7636 PKCE verifier. GAMA performs the token exchange server-side, verifies the
+returned Google identity token, resolves `(google, sub)`, and returns the same
+ordinary opaque GAMA session contract. Email claims are stored only as metadata
+and never cause account merging.
 
 ### `POST /authentication/federated/:provider/resolve`
 
@@ -429,6 +438,10 @@ Configuration is validated with Zod at startup and fails fast when invalid.
 | `APPLE_TEAM_ID` | — | Apple Developer Team ID used only to sign the server-side client secret |
 | `APPLE_KEY_ID` | — | Sign in with Apple key identifier used only by GAMA |
 | `APPLE_PRIVATE_KEY` | — | Sign in with Apple private key stored only in the runtime secret environment |
+| `GOOGLE_CLIENT_IDS` | — | Comma-separated public Google OAuth client ID audience allowlist; Google exchange fails closed when absent |
+| `GOOGLE_WEB_CLIENT_ID` | — | Public OAuth client ID used for the Google web authorization-code flow; configure with all Google web values |
+| `GOOGLE_WEB_CLIENT_SECRET` | — | Google OAuth client secret stored only in the runtime secret environment |
+| `GOOGLE_WEB_REDIRECT_URI` | — | Exact registered HTTPS callback for the Google web flow |
 
 The following inputs are used only by the operator-only Coco bootstrap command
 and have no defaults: `COCO_OWNER_HUMAN_IDENTITY_ID`, `COCO_WORKLOAD_SECRET`,

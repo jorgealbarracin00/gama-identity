@@ -3,4 +3,6 @@ dist/
 .env
 *.log
 *.p8
+client_secret*.json
+google-credentials*.json
 .DS_Store

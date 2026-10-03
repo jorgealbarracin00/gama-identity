@@ -10,6 +10,7 @@ describe("environment configuration", () => {
     assert.equal(config.DATABASE_URL, undefined);
     assert.equal(config.DATABASE_SSL, "disable");
     assert.deepEqual(config.APPLE_CLIENT_IDS, []);
+    assert.deepEqual(config.GOOGLE_CLIENT_IDS, []);
     assert.equal(config.SESSION_DURATION_SECONDS, 86_400);
     assert.equal(config.SESSION_RENEWAL_DURATION_SECONDS, 2_592_000);
   });
@@ -56,6 +57,29 @@ describe("environment configuration", () => {
     assert.throws(() => loadConfig({
       APPLE_CLIENT_IDS: "com.gamadynamics.cocothellama.web",
       APPLE_WEB_CLIENT_ID: "com.gamadynamics.cocothellama.web",
+    }), /configured completely/);
+  });
+
+  it("parses Google client identifiers and requires complete allowlisted web configuration", () => {
+    const clientId = "123456789.apps.googleusercontent.com";
+    const config = loadConfig({
+      GOOGLE_CLIENT_IDS: `${clientId}, another.apps.googleusercontent.com, ${clientId}`,
+      GOOGLE_WEB_CLIENT_ID: clientId,
+      GOOGLE_WEB_CLIENT_SECRET: "server-only-secret",
+      GOOGLE_WEB_REDIRECT_URI: "https://cocothellama.com/api/auth/google/callback",
+    });
+    assert.deepEqual(config.GOOGLE_CLIENT_IDS, [clientId, "another.apps.googleusercontent.com"]);
+    assert.equal(config.GOOGLE_WEB_CLIENT_ID, clientId);
+    assert.throws(() => loadConfig({ GOOGLE_CLIENT_IDS: " , " }), /GOOGLE_CLIENT_IDS/);
+    assert.throws(() => loadConfig({
+      GOOGLE_CLIENT_IDS: "another.apps.googleusercontent.com",
+      GOOGLE_WEB_CLIENT_ID: clientId,
+      GOOGLE_WEB_CLIENT_SECRET: "server-only-secret",
+      GOOGLE_WEB_REDIRECT_URI: "https://cocothellama.com/api/auth/google/callback",
+    }), /must include GOOGLE_WEB_CLIENT_ID/);
+    assert.throws(() => loadConfig({
+      GOOGLE_CLIENT_IDS: clientId,
+      GOOGLE_WEB_CLIENT_ID: clientId,
     }), /configured completely/);
   });
 
