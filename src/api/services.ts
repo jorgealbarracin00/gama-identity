@@ -1,10 +1,12 @@
 import { Argon2PasswordOperations } from "../authentication/adapters/argon2-password-operations.js";
 import { AppleIdentityTokenVerifier, APPLE_FEDERATED_PROVIDER } from "../authentication/federated/adapters/apple-identity-token-verifier.js";
+import { AppleWebAuthorizationCodeExchanger } from "../authentication/federated/adapters/apple-authorization-code-exchanger.js";
 import {
   InMemoryFederatedAuthenticationNonceRepository,
   InMemoryFederatedIdentityRepository,
 } from "../authentication/federated/adapters/in-memory-federated-identity-repository.js";
 import { AuthenticateFederated } from "../authentication/federated/application/authenticate-federated.js";
+import { AuthenticateAppleWeb } from "../authentication/federated/application/authenticate-apple-web.js";
 import { ManageFederatedAuthenticationMethods } from "../authentication/federated/application/manage-federated-authentication-methods.js";
 import {
   FederatedIdentityTokenVerifiers,
@@ -77,6 +79,7 @@ export interface IdentityServices {
   };
   readonly login: Login;
   readonly authenticateFederated: AuthenticateFederated;
+  readonly authenticateAppleWeb?: AuthenticateAppleWeb;
   readonly federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   readonly logout: Logout;
   readonly validateSession: ValidateSession;
@@ -303,6 +306,7 @@ function composeServices(
   register: Register;
   login: Login;
   authenticateFederated: AuthenticateFederated;
+  authenticateAppleWeb?: AuthenticateAppleWeb;
   federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   logout: Logout;
   validateSession: ValidateSession;
@@ -346,6 +350,13 @@ function composeServices(
     clock,
     atomically,
   );
+  const appleWebConfig = appleWebConfiguration(runtimeConfig);
+  const authenticateAppleWeb = appleWebConfig === null
+    ? undefined
+    : new AuthenticateAppleWeb(
+      new AppleWebAuthorizationCodeExchanger(appleWebConfig),
+      authenticateFederated,
+    );
   const federatedAuthenticationMethods = new ManageFederatedAuthenticationMethods(
     new FederatedIdentityTokenVerifiers([appleVerifier]),
     federatedIdentities,
@@ -369,9 +380,35 @@ function composeServices(
     ),
     login: new Login(authenticate, createSession),
     authenticateFederated,
+    ...(authenticateAppleWeb === undefined ? {} : { authenticateAppleWeb }),
     federatedAuthenticationMethods,
     logout: new Logout(sessions),
     validateSession: new ValidateSession(sessions, clock),
+  };
+}
+
+function appleWebConfiguration(runtimeConfig: Config): {
+  clientId: string;
+  teamId: string;
+  keyId: string;
+  privateKey: string;
+  redirectUri: string;
+} | null {
+  if (
+    runtimeConfig.APPLE_WEB_CLIENT_ID === undefined ||
+    runtimeConfig.APPLE_WEB_REDIRECT_URI === undefined ||
+    runtimeConfig.APPLE_TEAM_ID === undefined ||
+    runtimeConfig.APPLE_KEY_ID === undefined ||
+    runtimeConfig.APPLE_PRIVATE_KEY === undefined
+  ) {
+    return null;
+  }
+  return {
+    clientId: runtimeConfig.APPLE_WEB_CLIENT_ID,
+    teamId: runtimeConfig.APPLE_TEAM_ID,
+    keyId: runtimeConfig.APPLE_KEY_ID,
+    privateKey: runtimeConfig.APPLE_PRIVATE_KEY,
+    redirectUri: runtimeConfig.APPLE_WEB_REDIRECT_URI,
   };
 }
 

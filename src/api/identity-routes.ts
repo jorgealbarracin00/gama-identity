@@ -8,6 +8,7 @@ import { SessionId } from "../sessions/domain/session-id.js";
 import { AppError } from "../shared/errors.js";
 import { FederatedAuthenticationError } from "../authentication/federated/application/errors.js";
 import { FederatedAuthenticationMethodError } from "../authentication/federated/application/manage-federated-authentication-methods.js";
+import { AppleAuthorizationCodeExchangeError } from "../authentication/federated/adapters/apple-authorization-code-exchanger.js";
 
 const credentialsSchema = z.object({
   email: z.string(),
@@ -18,6 +19,10 @@ const federatedProviderSchema = z.object({
 });
 const federatedCredentialSchema = z.object({
   identityToken: z.string().min(1).max(16_384),
+  nonce: z.string().min(32).max(256),
+}).strict();
+const appleWebCredentialSchema = z.object({
+  authorizationCode: z.string().min(1).max(4_096),
   nonce: z.string().min(32).max(256),
 }).strict();
 
@@ -68,6 +73,53 @@ export function identityRoutes(
           account: { email: result.providerEmail },
         });
       } catch (error) {
+        if (error instanceof FederatedAuthenticationError) {
+          request.log.warn(
+            { federatedFailureCode: error.code, provider: provider.data.provider },
+            "Federated authentication rejected",
+          );
+        }
+        throw translateFederatedAuthenticationError(error);
+      }
+    });
+
+    app.post("/authentication/federated/apple/web", async (request, reply) => {
+      const credential = appleWebCredentialSchema.safeParse(request.body);
+      if (!credential.success) {
+        throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      }
+      if (services.authenticateAppleWeb === undefined) {
+        throw new AppError(
+          "Apple web authentication is temporarily unavailable",
+          "APPLE_WEB_AUTHENTICATION_UNAVAILABLE",
+          503,
+        );
+      }
+      try {
+        const result = await services.authenticateAppleWeb.execute(credential.data);
+        return reply.send({
+          session: result.session,
+          account: { email: result.providerEmail },
+        });
+      } catch (error) {
+        if (error instanceof AppleAuthorizationCodeExchangeError) {
+          request.log.warn(
+            { appleWebFailureCode: error.code },
+            "Apple web authorization-code exchange rejected",
+          );
+          if (error.code === "TOKEN_EXCHANGE_UNAVAILABLE") {
+            throw new AppError(
+              "Apple web authentication is temporarily unavailable",
+              "APPLE_WEB_AUTHENTICATION_UNAVAILABLE",
+              503,
+            );
+          }
+          throw new AppError(
+            "The Apple authorization was not accepted",
+            "APPLE_AUTHORIZATION_CODE_INVALID",
+            401,
+          );
+        }
         throw translateFederatedAuthenticationError(error);
       }
     });

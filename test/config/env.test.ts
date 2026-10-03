@@ -23,6 +23,30 @@ describe("environment configuration", () => {
     assert.throws(() => loadConfig({ APPLE_CLIENT_IDS: " , " }), /APPLE_CLIENT_IDS/);
   });
 
+  it("requires complete Apple web configuration and an allowlisted Services ID", () => {
+    const configured = loadConfig({
+      APPLE_CLIENT_IDS: "com.gamadynamics.CocoCompanion,com.gamadynamics.cocothellama.web",
+      APPLE_WEB_CLIENT_ID: "com.gamadynamics.cocothellama.web",
+      APPLE_WEB_REDIRECT_URI: "https://cocothellama.com/api/auth/apple/callback",
+      APPLE_TEAM_ID: "33VYKC5J83",
+      APPLE_KEY_ID: "ABC123DEFG",
+      APPLE_PRIVATE_KEY: "private-key-material",
+    });
+    assert.equal(configured.APPLE_WEB_CLIENT_ID, "com.gamadynamics.cocothellama.web");
+    assert.throws(() => loadConfig({
+      APPLE_CLIENT_IDS: "com.gamadynamics.CocoCompanion",
+      APPLE_WEB_CLIENT_ID: "com.gamadynamics.cocothellama.web",
+      APPLE_WEB_REDIRECT_URI: "https://cocothellama.com/api/auth/apple/callback",
+      APPLE_TEAM_ID: "33VYKC5J83",
+      APPLE_KEY_ID: "ABC123DEFG",
+      APPLE_PRIVATE_KEY: "private-key-material",
+    }), /must include APPLE_WEB_CLIENT_ID/);
+    assert.throws(() => loadConfig({
+      APPLE_CLIENT_IDS: "com.gamadynamics.cocothellama.web",
+      APPLE_WEB_CLIENT_ID: "com.gamadynamics.cocothellama.web",
+    }), /configured completely/);
+  });
+
   it("accepts a PostgreSQL DATABASE_URL", () => {
     const config = loadConfig({
       REPOSITORY_MODE: "postgres",

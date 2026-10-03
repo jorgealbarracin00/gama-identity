@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { buildApp } from "../../src/api/app.js";
 import { buildTestServices } from "../operational/test-doubles.js";
+import { AuthenticateAppleWeb } from "../../src/authentication/federated/application/authenticate-apple-web.js";
 
 const nonce = "route_nonce_that_is_at_least_thirty_two_characters_123";
 
@@ -70,6 +71,52 @@ describe("federated identity HTTP boundary", () => {
     });
     assert.equal(unsupported.statusCode, 400);
     assert.equal(unsupported.json().error.code, "FEDERATED_PROVIDER_UNSUPPORTED");
+    await app.close();
+  });
+
+  it("exchanges an Apple web code into the same canonical federated identity flow", async () => {
+    const fixture = buildTestServices();
+    fixture.appleVerifier.accept("web-identity-token", {
+      subject: "shared-apple-subject",
+      email: "private@privaterelay.appleid.com",
+      emailVerified: true,
+      emailPrivate: true,
+    });
+    const authorizationCodes = {
+      async exchange(code: string) {
+        assert.equal(code, "single-use-web-code");
+        return "web-identity-token";
+      },
+    };
+    const app = buildApp({
+      ...fixture.services,
+      authenticateAppleWeb: new AuthenticateAppleWeb(
+        authorizationCodes,
+        fixture.services.authenticateFederated,
+      ),
+    });
+    const first = await app.inject({
+      method: "POST",
+      url: "/authentication/federated/apple/web",
+      payload: { authorizationCode: "single-use-web-code", nonce },
+    });
+    assert.equal(first.statusCode, 200);
+    assert.equal(first.json().session.humanIdentityId, "identity-1");
+    assert.equal(first.json().account.email, "private@privaterelay.appleid.com");
+    assert.equal(first.body.includes("single-use-web-code"), false);
+    await app.close();
+  });
+
+  it("keeps Apple web authentication unavailable unless server credentials are configured", async () => {
+    const fixture = buildTestServices();
+    const app = buildApp(fixture.services);
+    const response = await app.inject({
+      method: "POST",
+      url: "/authentication/federated/apple/web",
+      payload: { authorizationCode: "unused-code", nonce },
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().error.code, "APPLE_WEB_AUTHENTICATION_UNAVAILABLE");
     await app.close();
   });
 });

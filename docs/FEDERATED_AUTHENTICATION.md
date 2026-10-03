@@ -46,6 +46,13 @@ The schema and repository accept a future `provider = google` relationship.
 Authentication succeeds only when a verifier is registered for that provider;
 this release registers Apple only.
 
+Apple web authentication extends the same boundary. The browser receives a
+single-use authorization code for a Services ID associated with Coco
+Companion's primary App ID. GAMA exchanges the code directly with Apple using
+server-held credentials, verifies the resulting identity token, and enters the
+same provider-subject mapping and session-creation path used by the native app.
+No browser-supplied subject or email is trusted.
+
 ## Sign in with Apple verification
 
 GAMA verifies Apple identity tokens server-side using a maintained JOSE
@@ -157,6 +164,23 @@ The client cannot supply `subject`, `email`, `humanIdentityId`, Tenant, Product,
 role, or authorization fields. Strict request validation rejects additional
 properties.
 
+The companion website uses the server-to-server code exchange endpoint:
+
+```http
+POST /authentication/federated/apple/web
+Content-Type: application/json
+
+{
+  "authorizationCode": "<single-use Apple code>",
+  "nonce": "<raw one-time nonce>"
+}
+```
+
+GAMA signs a five-minute ES256 client-secret JWT, exchanges the code at Apple's
+token endpoint using the configured Services ID and exact return URI, and then
+performs the same issuer, audience, signature, expiry, nonce, replay, identity,
+and session checks as native authentication.
+
 Public error codes are deliberately sanitized:
 
 - `INVALID_REQUEST`
@@ -195,10 +219,12 @@ identifiers accepted in the token `aud` claim. For native apps these are the App
 IDs/bundle identifiers configured for Sign in with Apple. These identifiers are
 public configuration, not secrets.
 
-This identity-token-only native exchange does not require an Apple Team ID,
-Services ID, private key, or client secret on the GAMA server. Those credentials
-would be required only for later authorization-code exchange, refresh-token,
-revocation, web, or account-transfer workflows and must not be added speculatively.
+The native identity-token exchange does not require an Apple Team ID, Services
+ID, private key, or client secret. Web authorization-code exchange additionally
+requires all of `APPLE_WEB_CLIENT_ID`, `APPLE_WEB_REDIRECT_URI`,
+`APPLE_TEAM_ID`, `APPLE_KEY_ID`, and `APPLE_PRIVATE_KEY`. The web client ID must
+also appear in `APPLE_CLIENT_IDS`. The private key is stored only in the secure
+runtime environment and is never committed.
 
 When `APPLE_CLIENT_IDS` is absent, existing email/password operation and service
 startup remain available, while Apple exchange fails closed with

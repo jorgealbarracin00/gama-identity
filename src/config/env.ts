@@ -30,6 +30,11 @@ const environmentSchema = z.object({
     }
     return clientIds;
   }),
+  APPLE_WEB_CLIENT_ID: z.string().trim().min(1).optional(),
+  APPLE_WEB_REDIRECT_URI: z.string().url().startsWith("https://").optional(),
+  APPLE_TEAM_ID: z.string().regex(/^[A-Z0-9]{10}$/u).optional(),
+  APPLE_KEY_ID: z.string().regex(/^[A-Z0-9]{10}$/u).optional(),
+  APPLE_PRIVATE_KEY: z.string().min(1).optional(),
 }).superRefine((environment, context) => {
   if (
     environment.REPOSITORY_MODE === "postgres" &&
@@ -39,6 +44,31 @@ const environmentSchema = z.object({
       code: "custom",
       path: ["DATABASE_URL"],
       message: "DATABASE_URL is required when REPOSITORY_MODE is postgres",
+    });
+  }
+  const appleWebValues = [
+    environment.APPLE_WEB_CLIENT_ID,
+    environment.APPLE_WEB_REDIRECT_URI,
+    environment.APPLE_TEAM_ID,
+    environment.APPLE_KEY_ID,
+    environment.APPLE_PRIVATE_KEY,
+  ];
+  const configuredAppleWebValues = appleWebValues.filter((value) => value !== undefined).length;
+  if (configuredAppleWebValues !== 0 && configuredAppleWebValues !== appleWebValues.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["APPLE_WEB_CLIENT_ID"],
+      message: "Apple web authentication must be configured completely",
+    });
+  }
+  if (
+    environment.APPLE_WEB_CLIENT_ID !== undefined &&
+    !environment.APPLE_CLIENT_IDS.includes(environment.APPLE_WEB_CLIENT_ID)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["APPLE_CLIENT_IDS"],
+      message: "APPLE_CLIENT_IDS must include APPLE_WEB_CLIENT_ID",
     });
   }
 });

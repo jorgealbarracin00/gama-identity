@@ -411,7 +411,12 @@ Configuration is validated with Zod at startup and fails fast when invalid.
 | `REPOSITORY_MODE` | `memory` | `memory` or `postgres` infrastructure |
 | `DATABASE_URL` | — | Required in PostgreSQL mode |
 | `DATABASE_SSL` | `disable` | `disable` or `require` |
-| `APPLE_CLIENT_IDS` | — | Comma-separated public Apple client-ID audience allowlist; Apple exchange fails closed when absent |
+| `APPLE_CLIENT_IDS` | — | Comma-separated public native App ID and web Services ID audience allowlist; Apple exchange fails closed when absent |
+| `APPLE_WEB_CLIENT_ID` | — | Services ID used for the Apple web authorization-code flow; configure with all Apple web values |
+| `APPLE_WEB_REDIRECT_URI` | — | Exact registered HTTPS return URL for the Apple web flow |
+| `APPLE_TEAM_ID` | — | Apple Developer Team ID used only to sign the server-side client secret |
+| `APPLE_KEY_ID` | — | Sign in with Apple key identifier used only by GAMA |
+| `APPLE_PRIVATE_KEY` | — | Sign in with Apple private key stored only in the runtime secret environment |
 
 The following inputs are used only by the operator-only Coco bootstrap command
 and have no defaults: `COCO_OWNER_HUMAN_IDENTITY_ID`, `COCO_WORKLOAD_SECRET`,
