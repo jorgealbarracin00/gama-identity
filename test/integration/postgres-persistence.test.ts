@@ -25,14 +25,14 @@ import {
 } from "../../src/infrastructure/postgres/postgres-federated-identity-repository.js";
 import { AuthenticateFederated } from "../../src/authentication/federated/application/authenticate-federated.js";
 import { FederatedIdentityTokenVerifiers } from "../../src/authentication/federated/application/token-verifier.js";
-import { CreateSession } from "../../src/sessions/application/use-cases.js";
+import { CreateSession, RenewSession, ValidateSession } from "../../src/sessions/application/use-cases.js";
 import {
   UuidFederatedIdentityIdGenerator,
   UuidHumanIdentityIdGenerator,
   UuidSessionIdGenerator,
 } from "../../src/shared/identifiers.js";
 import { SystemClock } from "../../src/shared/clock.js";
-import { DeterministicAppleVerifier } from "../operational/test-doubles.js";
+import { DeterministicAppleVerifier, MutableClock, RenewalTokens, SessionIds } from "../operational/test-doubles.js";
 import {
   FederatedIdentity,
   FederatedIdentityProvider,
@@ -77,7 +77,7 @@ describe(
       const result = await database.query(
         "SELECT version FROM schema_migrations ORDER BY version",
       );
-      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006", "007", "008"]);
+      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006", "007", "008", "009"]);
     });
 
     it("starts and closes a PostgreSQL runtime after a connectivity check", async () => {
@@ -179,6 +179,33 @@ describe(
       await sessions.revoke(session.id);
       assert.equal((await sessions.findById(session.id))?.status, "revoked");
       assert.equal(await sessions.findActiveById(session.id), null);
+    });
+
+    it("atomically rotates PostgreSQL-backed renewal credentials", async () => {
+      const identity = identityAggregate();
+      await identities.save(identity);
+      const clock = new MutableClock(new Date("2026-01-01T00:00:00Z"));
+      const tokens = new RenewalTokens();
+      const create = new CreateSession(sessions, new SessionIds(), clock, 60, tokens, 300);
+      const original = await create.execute(identity.id);
+      clock.set(new Date("2026-01-01T00:02:00Z"));
+      const renewed = await new RenewSession(
+        sessions,
+        create,
+        tokens,
+        clock,
+        (work) => database.withTransaction(work),
+      ).execute(original.renewalToken);
+
+      assert.notEqual(renewed.sessionId, original.sessionId);
+      assert.deepEqual(
+        await new ValidateSession(sessions, clock).execute(SessionId.from(original.sessionId)),
+        { outcome: "revoked" },
+      );
+      assert.equal(
+        (await sessions.findByRenewalTokenHashForUpdate(tokens.hash(renewed.renewalToken)))?.id.value,
+        renewed.sessionId,
+      );
     });
 
     it("persists provider-neutral identities, unique subjects and consumed nonces", async () => {
@@ -476,6 +503,8 @@ function sessionAggregate(humanIdentityId: HumanIdentityId): Session {
     lastAccessedAt: fixedClock.now(),
     expiresAt: new Date("2026-01-02T00:00:00.000Z"),
     status: "active",
+    renewalTokenHash: null,
+    renewalExpiresAt: null,
   });
 }
 

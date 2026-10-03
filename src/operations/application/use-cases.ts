@@ -10,7 +10,7 @@ import type { CreateHumanIdentity } from "../../identity/application/use-cases.j
 import type { HumanIdentityId } from "../../identity/domain/human-identity-id.js";
 import type {
   CreateSession,
-  SessionMetadata,
+  CreatedSession,
 } from "../../sessions/application/use-cases.js";
 import { SessionId } from "../../sessions/domain/session-id.js";
 import { InvalidLoginError, RegistrationFailedError } from "./errors.js";
@@ -28,7 +28,7 @@ export interface RegistrationCompensator {
 
 export interface RegistrationResult {
   readonly humanIdentityId: string;
-  readonly session: SessionMetadata;
+  readonly session: CreatedSession;
 }
 
 export class Register {
@@ -87,7 +87,7 @@ export class Login {
     private readonly createSession: CreateSession,
   ) {}
 
-  async execute(input: CredentialsInput): Promise<SessionMetadata> {
+  async execute(input: CredentialsInput): Promise<CreatedSession> {
     const result: AuthenticationResult = await this.authenticate.execute({
       email: input.email,
       plaintextPassword: input.password,

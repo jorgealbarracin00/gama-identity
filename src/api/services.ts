@@ -8,6 +8,7 @@ import {
 import { AuthenticateFederated } from "../authentication/federated/application/authenticate-federated.js";
 import { AuthenticateAppleWeb } from "../authentication/federated/application/authenticate-apple-web.js";
 import { ManageFederatedAuthenticationMethods } from "../authentication/federated/application/manage-federated-authentication-methods.js";
+import { ResolveFederatedIdentity } from "../authentication/federated/application/resolve-federated-identity.js";
 import {
   FederatedIdentityTokenVerifiers,
   UnavailableFederatedIdentityTokenVerifier,
@@ -45,8 +46,10 @@ import { InMemorySessionRepository } from "../sessions/adapters/in-memory-sessio
 import {
   CreateSession,
   Logout,
+  RenewSession,
   ValidateSession,
 } from "../sessions/application/use-cases.js";
+import { SecureSessionRenewalTokenGenerator } from "../sessions/domain/session-renewal-token.js";
 import { SystemClock, type Clock } from "../shared/clock.js";
 import {
   UuidEmailCredentialIdGenerator,
@@ -80,8 +83,10 @@ export interface IdentityServices {
   readonly login: Login;
   readonly authenticateFederated: AuthenticateFederated;
   readonly authenticateAppleWeb?: AuthenticateAppleWeb;
+  readonly resolveFederatedIdentity: ResolveFederatedIdentity;
   readonly federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   readonly logout: Logout;
+  readonly renewSession: RenewSession;
   readonly validateSession: ValidateSession;
   readonly controlPlane: ControlPlane;
   readonly administration: AdministrationServices;
@@ -307,8 +312,10 @@ function composeServices(
   login: Login;
   authenticateFederated: AuthenticateFederated;
   authenticateAppleWeb?: AuthenticateAppleWeb;
+  resolveFederatedIdentity: ResolveFederatedIdentity;
   federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   logout: Logout;
+  renewSession: RenewSession;
   validateSession: ValidateSession;
 } {
   const passwordOperations = createPasswordOperations(runtimeConfig);
@@ -330,17 +337,21 @@ function composeServices(
     identities,
     passwordOperations,
   );
+  const renewalTokens = new SecureSessionRenewalTokenGenerator();
   const createSession = new CreateSession(
     sessions,
     new UuidSessionIdGenerator(),
     clock,
     runtimeConfig.SESSION_DURATION_SECONDS,
+    renewalTokens,
+    runtimeConfig.SESSION_RENEWAL_DURATION_SECONDS,
   );
   const appleVerifier = runtimeConfig.APPLE_CLIENT_IDS.length === 0
     ? new UnavailableFederatedIdentityTokenVerifier(APPLE_FEDERATED_PROVIDER)
     : new AppleIdentityTokenVerifier({ clientIds: runtimeConfig.APPLE_CLIENT_IDS });
+  const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier]);
   const authenticateFederated = new AuthenticateFederated(
-    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedVerifiers,
     federatedIdentities,
     federatedNonces,
     identities,
@@ -357,8 +368,15 @@ function composeServices(
       new AppleWebAuthorizationCodeExchanger(appleWebConfig),
       authenticateFederated,
     );
+  const resolveFederatedIdentity = new ResolveFederatedIdentity(
+    federatedVerifiers,
+    federatedIdentities,
+    federatedNonces,
+    clock,
+    atomically,
+  );
   const federatedAuthenticationMethods = new ManageFederatedAuthenticationMethods(
-    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedVerifiers,
     federatedIdentities,
     federatedNonces,
     identities,
@@ -381,8 +399,10 @@ function composeServices(
     login: new Login(authenticate, createSession),
     authenticateFederated,
     ...(authenticateAppleWeb === undefined ? {} : { authenticateAppleWeb }),
+    resolveFederatedIdentity,
     federatedAuthenticationMethods,
     logout: new Logout(sessions),
+    renewSession: new RenewSession(sessions, createSession, renewalTokens, clock, atomically),
     validateSession: new ValidateSession(sessions, clock),
   };
 }

@@ -7,6 +7,7 @@ import {
 } from "../../src/authentication/federated/adapters/in-memory-federated-identity-repository.js";
 import { AuthenticateFederated } from "../../src/authentication/federated/application/authenticate-federated.js";
 import { ManageFederatedAuthenticationMethods } from "../../src/authentication/federated/application/manage-federated-authentication-methods.js";
+import { ResolveFederatedIdentity } from "../../src/authentication/federated/application/resolve-federated-identity.js";
 import { FederatedAuthenticationError } from "../../src/authentication/federated/application/errors.js";
 import {
   FederatedIdentityTokenVerifiers,
@@ -24,6 +25,7 @@ import type { Clock } from "../../src/shared/clock.js";
 import { HumanIdentityId, type HumanIdentityIdGenerator } from "../../src/identity/domain/human-identity-id.js";
 import { EmailCredentialId, type EmailCredentialIdGenerator } from "../../src/authentication/credentials/domain/email-credential-id.js";
 import { SessionId, type SessionIdGenerator } from "../../src/sessions/domain/session-id.js";
+import type { SessionRenewalTokenGenerator } from "../../src/sessions/domain/session-renewal-token.js";
 import { InMemoryHumanIdentityRepository } from "../../src/identity/adapters/in-memory-human-identity-repository.js";
 import { InMemoryEmailCredentialRepository } from "../../src/authentication/credentials/adapters/in-memory-email-credential-repository.js";
 import { InMemorySessionRepository } from "../../src/sessions/adapters/in-memory-session-repository.js";
@@ -31,7 +33,7 @@ import { CreateHumanIdentity } from "../../src/identity/application/use-cases.js
 import { CreateEmailCredential } from "../../src/authentication/credentials/application/use-cases.js";
 import { BaselinePasswordPolicy } from "../../src/authentication/credentials/domain/password-policy.js";
 import { Authenticate } from "../../src/authentication/application/authenticate.js";
-import { CreateSession, Logout, ValidateSession } from "../../src/sessions/application/use-cases.js";
+import { CreateSession, Logout, RenewSession, ValidateSession } from "../../src/sessions/application/use-cases.js";
 import { InMemoryRegistrationCompensator } from "../../src/operations/adapters/in-memory-registration-compensator.js";
 import { Login, Register } from "../../src/operations/application/use-cases.js";
 import type { IdentityServices } from "../../src/api/services.js";
@@ -73,6 +75,18 @@ export class SessionIds implements SessionIdGenerator {
   next(): SessionId {
     this.sequence += 1;
     return SessionId.from(`session-${this.sequence}`);
+  }
+}
+
+export class RenewalTokens implements SessionRenewalTokenGenerator {
+  private sequence = 0;
+  next(): { readonly value: string; readonly hash: string } {
+    this.sequence += 1;
+    const value = `renewal-token-${String(this.sequence).padStart(32, "0")}`;
+    return { value, hash: this.hash(value) };
+  }
+  hash(value: string): string {
+    return createHash("sha256").update(value, "utf8").digest("hex");
   }
 }
 
@@ -175,20 +189,31 @@ export function buildTestServices(): {
     identities,
     passwords,
   );
+  const renewalTokens = new RenewalTokens();
   const createSession = new CreateSession(
     sessions,
     new SessionIds(),
     clock,
     3600,
+    renewalTokens,
+    86_400,
   );
+  const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier]);
   const authenticateFederated = new AuthenticateFederated(
-    new FederatedIdentityTokenVerifiers([appleVerifier]),
+    federatedVerifiers,
     federatedIdentities,
     federatedNonces,
     identities,
     identityIds,
     new FederatedIdentityIds(),
     createSession,
+    clock,
+    (work) => serial.execute(work),
+  );
+  const resolveFederatedIdentity = new ResolveFederatedIdentity(
+    federatedVerifiers,
+    federatedIdentities,
+    federatedNonces,
     clock,
     (work) => serial.execute(work),
   );
@@ -252,8 +277,16 @@ export function buildTestServices(): {
     ),
     login: new Login(authenticate, createSession),
     authenticateFederated,
+    resolveFederatedIdentity,
     federatedAuthenticationMethods,
     logout: new Logout(sessions),
+    renewSession: new RenewSession(
+      sessions,
+      createSession,
+      renewalTokens,
+      clock,
+      (work) => serial.execute(work),
+    ),
     validateSession: new ValidateSession(sessions, clock),
     controlPlane,
     administration,

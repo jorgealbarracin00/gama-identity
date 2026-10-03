@@ -1,7 +1,7 @@
 import { HumanIdentity } from "../../../identity/domain/human-identity.js";
 import type { HumanIdentityIdGenerator } from "../../../identity/domain/human-identity-id.js";
 import type { HumanIdentityRepository } from "../../../identity/ports/human-identity-repository.js";
-import type { CreateSession, SessionMetadata } from "../../../sessions/application/use-cases.js";
+import type { CreateSession, CreatedSession } from "../../../sessions/application/use-cases.js";
 import type { Clock } from "../../../shared/clock.js";
 import {
   FederatedIdentity,
@@ -30,7 +30,7 @@ export interface FederatedAuthenticationResult {
   readonly created: boolean;
   readonly humanIdentityId: string;
   readonly providerEmail: string | null;
-  readonly session: SessionMetadata;
+  readonly session: CreatedSession;
 }
 
 export class AuthenticateFederated {

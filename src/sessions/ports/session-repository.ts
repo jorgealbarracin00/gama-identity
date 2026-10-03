@@ -6,6 +6,7 @@ export interface SessionRepository {
   save(session: Session): Promise<void>;
   findById(id: SessionId): Promise<Session | null>;
   findActiveById(id: SessionId): Promise<Session | null>;
+  findByRenewalTokenHashForUpdate(hash: string): Promise<Session | null>;
   listByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<readonly Session[]>;
   revoke(id: SessionId): Promise<void>;
 }

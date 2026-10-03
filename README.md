@@ -98,7 +98,9 @@ rotating public keys, then resolves `(provider, providerSubject)`. Unknown Apple
 subjects create a new canonical Human transactionally; matching email never
 silently links an existing account. An authenticated Human may explicitly connect
 Apple by proving both its ordinary GAMA session and a fresh verified Apple
-credential. See
+credential. A separate resolve-only boundary can verify a provider credential
+and disclose only whether its exact provider/subject relationship already
+exists, without creating a Human, relationship, or session. See
 [`docs/FEDERATED_AUTHENTICATION.md`](docs/FEDERATED_AUTHENTICATION.md).
 
 ## Session flow
@@ -153,6 +155,15 @@ Accepts only an Apple identity token and its raw one-time nonce. The server
 cryptographically verifies Apple and returns the same ordinary opaque GAMA
 session contract. It does not accept a subject, email, Human Identity ID, or any
 authorization relationship from the caller.
+
+### `POST /authentication/federated/:provider/resolve`
+
+Accepts the same strict provider credential body and consumes its verified nonce
+once. Returns only `{ "outcome": "EXISTING" }` when the exact provider/subject
+relationship exists (including disabled or retired history), or
+`{ "outcome": "UNLINKED" }` otherwise. It never creates a Human, relationship,
+or session and never returns identity, provider-subject, email, or authority
+data.
 
 ### `GET /authentication/methods`
 
@@ -407,7 +418,8 @@ Configuration is validated with Zod at startup and fails fast when invalid.
 | `PASSWORD_HASH_MEMORY_KIB` | `19456` | Argon2id memory cost |
 | `PASSWORD_HASH_ITERATIONS` | `2` | Argon2id time cost |
 | `PASSWORD_HASH_PARALLELISM` | `1` | Argon2id parallelism |
-| `SESSION_DURATION_SECONDS` | `86400` | Fixed session duration |
+| `SESSION_DURATION_SECONDS` | `86400` | Short-lived bearer session duration |
+| `SESSION_RENEWAL_DURATION_SECONDS` | `2592000` | Rotating renewable-session duration; must exceed bearer duration |
 | `REPOSITORY_MODE` | `memory` | `memory` or `postgres` infrastructure |
 | `DATABASE_URL` | — | Required in PostgreSQL mode |
 | `DATABASE_SSL` | `disable` | `disable` or `require` |

@@ -9,6 +9,7 @@ import { AppError } from "../shared/errors.js";
 import { FederatedAuthenticationError } from "../authentication/federated/application/errors.js";
 import { FederatedAuthenticationMethodError } from "../authentication/federated/application/manage-federated-authentication-methods.js";
 import { AppleAuthorizationCodeExchangeError } from "../authentication/federated/adapters/apple-authorization-code-exchanger.js";
+import { SessionRenewalError } from "../sessions/application/use-cases.js";
 
 const credentialsSchema = z.object({
   email: z.string(),
@@ -24,6 +25,9 @@ const federatedCredentialSchema = z.object({
 const appleWebCredentialSchema = z.object({
   authorizationCode: z.string().min(1).max(4_096),
   nonce: z.string().min(32).max(256),
+}).strict();
+const sessionRenewalSchema = z.object({
+  renewalToken: z.string().min(32).max(512),
 }).strict();
 
 export function identityRoutes(
@@ -124,6 +128,22 @@ export function identityRoutes(
       }
     });
 
+    app.post("/authentication/federated/:provider/resolve", async (request, reply) => {
+      const provider = federatedProviderSchema.safeParse(request.params);
+      const credential = federatedCredentialSchema.safeParse(request.body);
+      if (!provider.success || !credential.success) {
+        throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      }
+      try {
+        return reply.send(await services.resolveFederatedIdentity.execute({
+          provider: provider.data.provider,
+          ...credential.data,
+        }));
+      } catch (error) {
+        throw translateFederatedAuthenticationError(error);
+      }
+    });
+
     app.get("/authentication/methods", async (request, reply) => {
       try {
         const methods = await services.federatedAuthenticationMethods.list(bearerSessionId(request));
@@ -168,6 +188,25 @@ export function identityRoutes(
       const sessionId = bearerSessionId(request);
       await services.logout.execute(sessionId);
       return reply.status(204).send();
+    });
+
+    app.post("/session/refresh", async (request, reply) => {
+      const input = sessionRenewalSchema.safeParse(request.body);
+      if (!input.success) {
+        throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      }
+      try {
+        return reply.send({ session: await services.renewSession.execute(input.data.renewalToken) });
+      } catch (error) {
+        if (error instanceof SessionRenewalError) {
+          throw new AppError(
+            "Session cannot be renewed",
+            `SESSION_RENEWAL_${error.reason.toUpperCase()}`,
+            401,
+          );
+        }
+        throw error;
+      }
     });
 
     app.get("/session", async (request, reply) => {
