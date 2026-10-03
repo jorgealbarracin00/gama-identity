@@ -406,6 +406,13 @@ evidence fails closed and canonical Human ID remains the unambiguous fallback.
 Applying it is a separate deployment operation and must precede a runtime that
 depends on the indexed discovery path.
 
+Migration `010_email_password_security.sql` adds password-email verification,
+hashed one-time action challenges, and privacy-preserving security-attempt
+records. Existing password credentials are grandfathered as verified at their
+original creation time; new password registrations start unverified. The
+migration does not change Apple or Google relationships, merge Humans, or alter
+workforce authority.
+
 PostgreSQL integration tests are isolated from the runtime connection variable:
 
 ```bash
@@ -442,6 +449,16 @@ Configuration is validated with Zod at startup and fails fast when invalid.
 | `GOOGLE_WEB_CLIENT_ID` | — | Public OAuth client ID used for the Google web authorization-code flow; configure with all Google web values |
 | `GOOGLE_WEB_CLIENT_SECRET` | — | Google OAuth client secret stored only in the runtime secret environment |
 | `GOOGLE_WEB_REDIRECT_URI` | — | Exact registered HTTPS callback for the Google web flow |
+| `IDENTITY_TRUSTED_APPS` | Coco web | JSON allowlist of app IDs, display names, and HTTPS base origins used to construct email links |
+| `IDENTITY_DEFAULT_APP_ID` | `coco-web` | Trusted app used when a caller omits an app ID |
+| `IDENTITY_EMAIL_PROVIDER` | `disabled` | `disabled` or `resend`; disabled mode never claims a message was sent |
+| `IDENTITY_EMAIL_FROM` | — | Verified sender used only by the server-side email adapter |
+| `RESEND_API_KEY` | — | Server-only Resend API key; required with the Resend adapter |
+| `IDENTITY_EMAIL_VERIFICATION_TTL_SECONDS` | `86400` | Email confirmation lifetime |
+| `IDENTITY_PASSWORD_RESET_TTL_SECONDS` | `3600` | Password reset lifetime |
+| `IDENTITY_RATE_LIMIT_WINDOW_SECONDS` | `900` | Sliding security-attempt window |
+| `IDENTITY_RATE_LIMIT_MAXIMUM_ATTEMPTS` | `5` | Attempts allowed per action, account/email hash, or IP hash in the window |
+| `IDENTITY_RATE_LIMIT_SECRET` | development-only value | HMAC key for non-reversible email/account and IP rate-limit dimensions; set a unique production secret |
 
 The following inputs are used only by the operator-only Coco bootstrap command
 and have no defaults: `COCO_OWNER_HUMAN_IDENTITY_ID`, `COCO_WORKLOAD_SECRET`,

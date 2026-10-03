@@ -11,6 +11,11 @@ import { FederatedAuthenticationMethodError } from "../authentication/federated/
 import { AppleAuthorizationCodeExchangeError } from "../authentication/federated/adapters/apple-authorization-code-exchanger.js";
 import { GoogleAuthorizationCodeExchangeError } from "../authentication/federated/adapters/google-authorization-code-exchanger.js";
 import { SessionRenewalError } from "../sessions/application/use-cases.js";
+import {
+  EmailActionTokenError,
+  EmailSecurityRateLimitError,
+  TrustedIdentityAppError,
+} from "../authentication/email-security/application.js";
 
 const credentialsSchema = z.object({
   email: z.string(),
@@ -35,16 +40,41 @@ const googleWebCredentialSchema = z.object({
 const sessionRenewalSchema = z.object({
   renewalToken: z.string().min(32).max(512),
 }).strict();
+const identityAppSchema = z.object({
+  appId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u).optional(),
+}).strict();
+const forgotPasswordSchema = identityAppSchema.extend({
+  email: z.string().min(1).max(320),
+}).strict();
+const emailActionTokenSchema = z.object({
+  token: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
+}).strict();
+const resetPasswordSchema = emailActionTokenSchema.extend({
+  password: z.string().min(1).max(128),
+}).strict();
 
 export function identityRoutes(
   services: IdentityServices,
 ): FastifyPluginAsync {
   return async (app) => {
     app.post("/register", async (request, reply) => {
-      const input = parseCredentials(request.body);
+      const input = parseRegistration(request.body);
       try {
+        await services.emailPasswordSecurity.guardRegistration(input.email, request.ip, input.appId);
         const result = await services.register.execute(input);
-        return reply.status(201).send(result);
+        let delivery: "sent" | "disabled" | "failed" = "failed";
+        try {
+          delivery = await services.emailPasswordSecurity.sendRegistrationVerification({
+            email: input.email,
+            ...(input.appId === undefined ? {} : { appId: input.appId }),
+          });
+        } catch {
+          request.log.error("Registration completed but verification delivery preparation failed");
+        }
+        return reply.status(201).send({
+          ...result,
+          emailVerification: { required: true, delivery },
+        });
       } catch (error) {
         throw translateRegistrationError(error);
       }
@@ -200,6 +230,86 @@ export function identityRoutes(
       }
     });
 
+    app.get("/authentication/email-password", async (request, reply) => {
+      const sessionId = bearerSessionId(request);
+      const validation = await services.validateSession.execute(sessionId);
+      if (validation.outcome !== "authenticated") {
+        throw new AppError("Session is not authenticated", `SESSION_${validation.outcome.toUpperCase()}`, 401);
+      }
+      return reply.send(await services.emailPasswordSecurity.authenticationState(sessionId.value));
+    });
+
+    app.post("/email-verification/resend", async (request, reply) => {
+      const input = identityAppSchema.safeParse(request.body ?? {});
+      if (!input.success) throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      try {
+        await services.emailPasswordSecurity.resendVerification({
+          sessionId: bearerSessionId(request).value,
+          ipAddress: request.ip,
+          ...(input.data.appId === undefined ? {} : { appId: input.data.appId }),
+        });
+      } catch (error) {
+        if (error instanceof TrustedIdentityAppError) {
+          throw new AppError("Invalid application", "IDENTITY_APP_INVALID", 400);
+        }
+        throw error;
+      }
+      return reply.status(202).send({
+        message: "If verification is still needed, delivery has been requested.",
+        deliveryAvailable: services.emailPasswordSecurity.emailDeliveryAvailable,
+      });
+    });
+
+    app.post("/email-verification/verify", async (request, reply) => {
+      const input = emailActionTokenSchema.safeParse(request.body);
+      if (!input.success) throw invalidEmailActionToken();
+      try {
+        await services.emailPasswordSecurity.verifyEmail(input.data.token, request.ip);
+        return reply.status(204).send();
+      } catch (error) {
+        throw translateEmailActionError(error);
+      }
+    });
+
+    app.post("/password/forgot", async (request, reply) => {
+      const input = forgotPasswordSchema.safeParse(request.body);
+      if (!input.success) throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      try {
+        await services.emailPasswordSecurity.requestPasswordReset({
+          email: input.data.email,
+          ipAddress: request.ip,
+          ...(input.data.appId === undefined ? {} : { appId: input.data.appId }),
+        });
+      } catch (error) {
+        if (error instanceof TrustedIdentityAppError) {
+          throw new AppError("Invalid application", "IDENTITY_APP_INVALID", 400);
+        }
+        throw error;
+      }
+      return reply.status(202).send({
+        message: "If an eligible account exists, reset instructions have been requested.",
+        deliveryAvailable: services.emailPasswordSecurity.emailDeliveryAvailable,
+      });
+    });
+
+    app.post("/password/reset", async (request, reply) => {
+      const input = resetPasswordSchema.safeParse(request.body);
+      if (!input.success) throw new AppError("Reset details are invalid", "INVALID_PASSWORD_RESET", 400);
+      try {
+        await services.emailPasswordSecurity.resetPassword({
+          token: input.data.token,
+          plaintextPassword: input.data.password,
+          ipAddress: request.ip,
+        });
+        return reply.status(204).send();
+      } catch (error) {
+        if (error instanceof InvalidPasswordError) {
+          throw new AppError("Use a password between 12 and 128 characters", "INVALID_PASSWORD", 400);
+        }
+        throw translateEmailActionError(error);
+      }
+    });
+
     app.post("/authentication/federated/:provider/link", async (request, reply) => {
       const provider = federatedProviderSchema.safeParse(request.params);
       const credential = federatedCredentialSchema.safeParse(request.body);
@@ -323,6 +433,22 @@ function parseCredentials(body: unknown): {
   return parsed.data;
 }
 
+function parseRegistration(body: unknown): {
+  email: string;
+  password: string;
+  appId?: string;
+} {
+  const parsed = credentialsSchema.extend({
+    appId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u).optional(),
+  }).strict().safeParse(body);
+  if (!parsed.success) throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+  return {
+    email: parsed.data.email,
+    password: parsed.data.password,
+    ...(parsed.data.appId === undefined ? {} : { appId: parsed.data.appId }),
+  };
+}
+
 function bearerSessionId(request: FastifyRequest): SessionId {
   const authorization = request.headers.authorization;
   const match = /^Bearer ([^\s]+)$/.exec(authorization ?? "");
@@ -337,6 +463,12 @@ function bearerSessionId(request: FastifyRequest): SessionId {
 }
 
 function translateRegistrationError(error: unknown): Error {
+  if (error instanceof TrustedIdentityAppError) {
+    return new AppError("Invalid application", "IDENTITY_APP_INVALID", 400);
+  }
+  if (error instanceof EmailSecurityRateLimitError) {
+    return new AppError("Please wait before trying again", "RATE_LIMITED", 429);
+  }
   if (error instanceof EmailAlreadyInUseError) {
     return new AppError(
       "An account cannot be created with these details",
@@ -352,4 +484,20 @@ function translateRegistrationError(error: unknown): Error {
     );
   }
   return error instanceof Error ? error : new Error("Registration failed");
+}
+
+function invalidEmailActionToken(): AppError {
+  return new AppError(
+    "This link is invalid, expired, or has already been used",
+    "EMAIL_ACTION_TOKEN_INVALID",
+    400,
+  );
+}
+
+function translateEmailActionError(error: unknown): Error {
+  if (error instanceof EmailActionTokenError) return invalidEmailActionToken();
+  if (error instanceof EmailSecurityRateLimitError) {
+    return new AppError("Please wait before trying again", "RATE_LIMITED", 429);
+  }
+  return error instanceof Error ? error : new Error("Email security action failed");
 }

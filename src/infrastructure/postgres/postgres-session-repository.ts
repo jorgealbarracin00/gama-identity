@@ -88,6 +88,15 @@ export class PostgresSessionRepository implements SessionRepository {
     );
   }
 
+  async revokeByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<void> {
+    await this.database.query(
+      `UPDATE sessions
+       SET status = 'revoked'
+       WHERE human_identity_id = $1 AND status <> 'revoked'`,
+      [humanIdentityId.value],
+    );
+  }
+
   async remove(id: SessionId): Promise<void> {
     await this.database.query("DELETE FROM sessions WHERE id = $1", [id.value]);
   }

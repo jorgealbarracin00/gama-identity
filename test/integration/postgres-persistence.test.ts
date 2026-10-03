@@ -60,7 +60,8 @@ describe(
 
     beforeEach(async () => {
       await database.query(
-        `TRUNCATE federated_authentication_nonces, federated_identities, sessions, credentials,
+        `TRUNCATE identity_security_attempts, email_action_challenges,
+          federated_authentication_nonces, federated_identities, sessions, credentials,
           platform_audit_events, tenant_provisioning_requests, platform_administration_memberships,
           product_entitlements, product_participations, tenant_memberships, product_workloads,
           tenants, registered_products, human_identities CASCADE`,
@@ -77,7 +78,7 @@ describe(
       const result = await database.query(
         "SELECT version FROM schema_migrations ORDER BY version",
       );
-      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006", "007", "008", "009"]);
+      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010"]);
     });
 
     it("starts and closes a PostgreSQL runtime after a connectivity check", async () => {

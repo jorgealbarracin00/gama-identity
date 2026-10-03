@@ -2,6 +2,39 @@ import "dotenv/config";
 
 import { z } from "zod";
 
+const trustedIdentityAppsSchema = z.array(z.object({
+  id: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+  displayName: z.string().trim().min(1).max(80),
+  baseUrl: z.string().url().transform((value) => value.replace(/\/$/u, "")),
+}).strict()).min(1).max(20).superRefine((apps, context) => {
+  if (new Set(apps.map((app) => app.id)).size !== apps.length) {
+    context.addIssue({ code: "custom", message: "Trusted identity app ids must be unique" });
+  }
+  for (const [index, app] of apps.entries()) {
+    const url = new URL(app.baseUrl);
+    if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+      context.addIssue({
+        code: "custom",
+        path: [index, "baseUrl"],
+        message: "Trusted identity app base URLs must use HTTPS",
+      });
+    }
+    if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+      context.addIssue({
+        code: "custom",
+        path: [index, "baseUrl"],
+        message: "Trusted identity app base URLs cannot contain a path, query, or fragment",
+      });
+    }
+  }
+});
+
+const defaultTrustedApps = JSON.stringify([{
+  id: "coco-web",
+  displayName: "Coco the Llama",
+  baseUrl: "https://cocothellama.com",
+}]);
+
 const environmentSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
   NODE_ENV: z
@@ -52,6 +85,28 @@ const environmentSchema = z.object({
   GOOGLE_WEB_CLIENT_ID: z.string().trim().min(1).optional(),
   GOOGLE_WEB_CLIENT_SECRET: z.string().min(1).optional(),
   GOOGLE_WEB_REDIRECT_URI: z.string().url().startsWith("https://").optional(),
+  IDENTITY_TRUSTED_APPS: z.string().default(defaultTrustedApps).transform((value, context) => {
+    try {
+      const result = trustedIdentityAppsSchema.safeParse(JSON.parse(value));
+      if (!result.success) {
+        context.addIssue({ code: "custom", message: z.prettifyError(result.error) });
+        return z.NEVER;
+      }
+      return result.data;
+    } catch {
+      context.addIssue({ code: "custom", message: "IDENTITY_TRUSTED_APPS must be valid JSON" });
+      return z.NEVER;
+    }
+  }),
+  IDENTITY_DEFAULT_APP_ID: z.string().default("coco-web"),
+  IDENTITY_EMAIL_PROVIDER: z.enum(["disabled", "resend"]).default("disabled"),
+  IDENTITY_EMAIL_FROM: z.string().trim().min(3).max(320).optional(),
+  RESEND_API_KEY: z.string().min(10).optional(),
+  IDENTITY_EMAIL_VERIFICATION_TTL_SECONDS: z.coerce.number().int().min(300).max(604_800).default(86_400),
+  IDENTITY_PASSWORD_RESET_TTL_SECONDS: z.coerce.number().int().min(300).max(86_400).default(3_600),
+  IDENTITY_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
+  IDENTITY_RATE_LIMIT_MAXIMUM_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(5),
+  IDENTITY_RATE_LIMIT_SECRET: z.string().min(32).default("development-only-rate-limit-key-change-me"),
 }).superRefine((environment, context) => {
   if (environment.SESSION_RENEWAL_DURATION_SECONDS <= environment.SESSION_DURATION_SECONDS) {
     context.addIssue({
@@ -116,6 +171,23 @@ const environmentSchema = z.object({
       code: "custom",
       path: ["GOOGLE_CLIENT_IDS"],
       message: "GOOGLE_CLIENT_IDS must include GOOGLE_WEB_CLIENT_ID",
+    });
+  }
+  if (!environment.IDENTITY_TRUSTED_APPS.some((app) => app.id === environment.IDENTITY_DEFAULT_APP_ID)) {
+    context.addIssue({
+      code: "custom",
+      path: ["IDENTITY_DEFAULT_APP_ID"],
+      message: "IDENTITY_DEFAULT_APP_ID must identify a trusted app",
+    });
+  }
+  if (
+    environment.IDENTITY_EMAIL_PROVIDER === "resend" &&
+    (environment.RESEND_API_KEY === undefined || environment.IDENTITY_EMAIL_FROM === undefined)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["IDENTITY_EMAIL_PROVIDER"],
+      message: "Resend delivery requires RESEND_API_KEY and IDENTITY_EMAIL_FROM",
     });
   }
 });

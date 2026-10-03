@@ -21,6 +21,7 @@ export interface EmailCredentialSnapshot {
   readonly email: NormalizedEmail;
   readonly passwordHash: PasswordHash;
   readonly status: EmailCredentialStatus;
+  readonly emailVerifiedAt?: Date | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -32,6 +33,7 @@ export class EmailCredential {
     private readonly normalizedEmail: NormalizedEmail,
     private passwordDigest: PasswordHash,
     private lifecycleStatus: EmailCredentialStatus,
+    private verificationTime: Date | null,
     private readonly creationTime: Date,
     private lastUpdatedTime: Date,
   ) {}
@@ -51,6 +53,7 @@ export class EmailCredential {
       email,
       passwordHash,
       "active",
+      null,
       new Date(now.getTime()),
       new Date(now.getTime()),
     );
@@ -63,6 +66,9 @@ export class EmailCredential {
       snapshot.email,
       snapshot.passwordHash,
       snapshot.status,
+      snapshot.emailVerifiedAt === undefined || snapshot.emailVerifiedAt === null
+        ? null
+        : new Date(snapshot.emailVerifiedAt),
       new Date(snapshot.createdAt),
       new Date(snapshot.updatedAt),
     );
@@ -82,6 +88,14 @@ export class EmailCredential {
 
   get status(): EmailCredentialStatus {
     return this.lifecycleStatus;
+  }
+
+  get emailVerified(): boolean {
+    return this.verificationTime !== null;
+  }
+
+  get emailVerifiedAt(): Date | null {
+    return this.verificationTime === null ? null : new Date(this.verificationTime);
   }
 
   get createdAt(): Date {
@@ -134,6 +148,16 @@ export class EmailCredential {
     this.lastUpdatedTime = new Date(now.getTime());
   }
 
+  markEmailVerified(clock: Clock): void {
+    if (this.lifecycleStatus === "retired") {
+      throw new RetiredEmailCredentialMutationError();
+    }
+    if (this.verificationTime !== null) return;
+    const now = clock.now();
+    this.verificationTime = new Date(now);
+    this.lastUpdatedTime = new Date(now);
+  }
+
   isEligibleForAuthentication(): boolean {
     return this.lifecycleStatus === "active";
   }
@@ -161,6 +185,7 @@ export class EmailCredential {
       this.normalizedEmail,
       this.passwordDigest,
       this.lifecycleStatus,
+      this.emailVerifiedAt,
       this.createdAt,
       this.updatedAt,
     );
@@ -173,6 +198,7 @@ export class EmailCredential {
       email: this.normalizedEmail,
       passwordHash: this.passwordDigest,
       status: this.lifecycleStatus,
+      emailVerifiedAt: this.emailVerifiedAt,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
     };

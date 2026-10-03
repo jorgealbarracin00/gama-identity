@@ -37,6 +37,12 @@ export class InMemorySessionRepository implements SessionRepository {
     this.sessions.set(id.value, session);
   }
 
+  async revokeByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<void> {
+    for (const session of this.sessions.values()) {
+      if (session.humanIdentityId.equals(humanIdentityId)) session.revoke();
+    }
+  }
+
   async remove(id: SessionId): Promise<void> {
     this.sessions.delete(id.value);
   }

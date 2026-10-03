@@ -61,6 +61,8 @@ describe("Email Credential use cases", () => {
       humanIdentityId: "human_01",
       email: "Person@example.com",
       status: "active",
+      emailVerified: false,
+      emailVerifiedAt: null,
       createdAt: new Date("2026-02-01T00:00:00.000Z"),
       updatedAt: new Date("2026-02-01T00:00:00.000Z"),
     });

@@ -8,6 +8,8 @@ export interface EmailCredentialMetadata {
   readonly humanIdentityId: string;
   readonly email: string;
   readonly status: EmailCredentialStatus;
+  readonly emailVerified: boolean;
+  readonly emailVerifiedAt: Date | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -20,6 +22,8 @@ export function toEmailCredentialMetadata(
     humanIdentityId: credential.humanIdentityId.value,
     email: credential.email.value,
     status: credential.status,
+    emailVerified: credential.emailVerified,
+    emailVerifiedAt: credential.emailVerifiedAt,
     createdAt: credential.createdAt,
     updatedAt: credential.updatedAt,
   };

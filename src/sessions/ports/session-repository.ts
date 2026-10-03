@@ -9,4 +9,5 @@ export interface SessionRepository {
   findByRenewalTokenHashForUpdate(hash: string): Promise<Session | null>;
   listByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<readonly Session[]>;
   revoke(id: SessionId): Promise<void>;
+  revokeByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<void>;
 }

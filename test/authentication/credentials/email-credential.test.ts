@@ -43,8 +43,22 @@ describe("EmailCredential", () => {
     assert.equal(credential.humanIdentityId.value, "human_01");
     assert.equal(credential.email.value, "Person@example.com");
     assert.equal(credential.status, "active");
+    assert.equal(credential.emailVerified, false);
+    assert.equal(credential.emailVerifiedAt, null);
     assert.deepEqual(credential.createdAt, createdAt);
     assert.deepEqual(credential.updatedAt, createdAt);
+  });
+
+  it("marks email verification once without changing authentication eligibility", () => {
+    const { credential, clock } = createCredential();
+    credential.markEmailVerified(clock);
+    assert.equal(credential.emailVerified, true);
+    assert.deepEqual(credential.emailVerifiedAt, changedAt);
+    assert.equal(credential.isEligibleForAuthentication(), true);
+
+    clock.set(new Date("2026-02-06T00:00:00.000Z"));
+    credential.markEmailVerified(clock);
+    assert.deepEqual(credential.emailVerifiedAt, changedAt);
   });
 
   it("disables, enables, and retires with transition timestamps", () => {

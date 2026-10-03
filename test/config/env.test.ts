@@ -13,6 +13,34 @@ describe("environment configuration", () => {
     assert.deepEqual(config.GOOGLE_CLIENT_IDS, []);
     assert.equal(config.SESSION_DURATION_SECONDS, 86_400);
     assert.equal(config.SESSION_RENEWAL_DURATION_SECONDS, 2_592_000);
+    assert.equal(config.IDENTITY_EMAIL_PROVIDER, "disabled");
+    assert.equal(config.IDENTITY_TRUSTED_APPS[0]?.id, "coco-web");
+  });
+
+  it("accepts only trusted HTTPS app origins and complete Resend configuration", () => {
+    const config = loadConfig({
+      IDENTITY_TRUSTED_APPS: JSON.stringify([{
+        id: "coco-web",
+        displayName: "Coco the Llama",
+        baseUrl: "https://cocothellama.com",
+      }]),
+      IDENTITY_EMAIL_PROVIDER: "resend",
+      IDENTITY_EMAIL_FROM: "Coco the Llama <hello@auth.cocothellama.com>",
+      RESEND_API_KEY: "re_server-only-secret",
+    });
+    assert.equal(config.IDENTITY_EMAIL_PROVIDER, "resend");
+    assert.equal(config.IDENTITY_TRUSTED_APPS[0]?.baseUrl, "https://cocothellama.com");
+
+    assert.throws(() => loadConfig({
+      IDENTITY_TRUSTED_APPS: JSON.stringify([{
+        id: "coco-web",
+        displayName: "Coco",
+        baseUrl: "http://cocothellama.com",
+      }]),
+    }), /must use HTTPS/);
+    assert.throws(() => loadConfig({
+      IDENTITY_EMAIL_PROVIDER: "resend",
+    }), /Resend delivery requires/);
   });
 
   it("requires the renewable session lifetime to exceed bearer lifetime", () => {

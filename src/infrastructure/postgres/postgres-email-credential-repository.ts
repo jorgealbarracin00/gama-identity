@@ -16,6 +16,7 @@ interface CredentialRow {
   normalized_email: string;
   password_hash: string;
   status: EmailCredentialStatus;
+  email_verified_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -36,12 +37,13 @@ export class PostgresEmailCredentialRepository
       await this.database.query(
         `INSERT INTO credentials (
            id, human_identity_id, normalized_email, password_hash,
-           status, created_at, updated_at
+           status, email_verified_at, created_at, updated_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (id) DO UPDATE SET
            password_hash = EXCLUDED.password_hash,
            status = EXCLUDED.status,
+           email_verified_at = EXCLUDED.email_verified_at,
            updated_at = EXCLUDED.updated_at`,
         [
           snapshot.id.value,
@@ -49,6 +51,7 @@ export class PostgresEmailCredentialRepository
           snapshot.email.value,
           snapshot.passwordHash.value,
           snapshot.status,
+          snapshot.emailVerifiedAt,
           snapshot.createdAt,
           snapshot.updatedAt,
         ],
@@ -119,7 +122,7 @@ export class PostgresEmailCredentialRepository
 
 const selectCredential = `
   SELECT id, human_identity_id, normalized_email, password_hash,
-         status, created_at, updated_at
+         status, email_verified_at, created_at, updated_at
   FROM credentials
 `;
 
@@ -132,6 +135,7 @@ function toCredential(row: CredentialRow | undefined): EmailCredential | null {
         email: NormalizedEmail.from(row.normalized_email),
         passwordHash: PasswordHash.from(row.password_hash),
         status: row.status,
+        emailVerifiedAt: row.email_verified_at,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       });

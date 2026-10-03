@@ -47,6 +47,16 @@ import {
 } from "../../src/control-plane/application/platform-administration.js";
 import { TenantTeamAdministration } from "../../src/control-plane/application/tenant-team-administration.js";
 import { SerialExecutor } from "../../src/shared/serial-executor.js";
+import {
+  InMemoryEmailActionChallengeRepository,
+  InMemoryIdentitySecurityAttemptRepository,
+  SecureEmailActionTokenGenerator,
+} from "../../src/authentication/email-security/adapters.js";
+import { EmailPasswordSecurity } from "../../src/authentication/email-security/application.js";
+import type {
+  IdentityEmailMessage,
+  IdentityEmailService,
+} from "../../src/authentication/email-security/ports.js";
 
 export class MutableClock implements Clock {
   constructor(private value: Date) {}
@@ -161,6 +171,16 @@ export class DeterministicPasswords
   }
 }
 
+export class RecordingIdentityEmailService implements IdentityEmailService {
+  readonly enabled = true;
+  readonly messages: IdentityEmailMessage[] = [];
+
+  async send(message: IdentityEmailMessage): Promise<"sent"> {
+    this.messages.push(message);
+    return "sent";
+  }
+}
+
 export function buildTestServices(): {
   services: IdentityServices;
   clock: MutableClock;
@@ -174,6 +194,7 @@ export function buildTestServices(): {
   controlPlaneRepository: InMemoryControlPlaneRepository;
   workforceAdministration: WorkforceAdministration;
   platformAdministrationProvisioning: PlatformAdministrationProvisioning;
+  emails: RecordingIdentityEmailService;
 } {
   const clock = new MutableClock(new Date("2026-01-01T00:00:00Z"));
   const identities = new InMemoryHumanIdentityRepository();
@@ -184,6 +205,9 @@ export function buildTestServices(): {
   const appleVerifier = new DeterministicAppleVerifier();
   const googleVerifier = new DeterministicGoogleVerifier();
   const serial = new SerialExecutor();
+  const emailChallenges = new InMemoryEmailActionChallengeRepository();
+  const securityAttempts = new InMemoryIdentitySecurityAttemptRepository();
+  const emails = new RecordingIdentityEmailService();
   const passwords = new DeterministicPasswords();
   const identityIds = new IdentityIds();
   const createIdentity = new CreateHumanIdentity(
@@ -211,6 +235,29 @@ export function buildTestServices(): {
     3600,
     renewalTokens,
     86_400,
+  );
+  const validateSession = new ValidateSession(sessions, clock);
+  const emailPasswordSecurity = new EmailPasswordSecurity(
+    credentials,
+    sessions,
+    validateSession,
+    emailChallenges,
+    securityAttempts,
+    emails,
+    [{ id: "coco-web", displayName: "Coco the Llama", baseUrl: "https://cocothellama.com" }],
+    new SecureEmailActionTokenGenerator(),
+    new BaselinePasswordPolicy(),
+    passwords,
+    clock,
+    {
+      defaultAppId: "coco-web",
+      verificationTtlSeconds: 86_400,
+      passwordResetTtlSeconds: 3_600,
+      rateLimitWindowSeconds: 900,
+      rateLimitMaximumAttempts: 5,
+      rateLimitSecret: "test-rate-limit-secret-with-32-characters",
+    },
+    (work) => serial.execute(work),
   );
   const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier, googleVerifier]);
   const authenticateFederated = new AuthenticateFederated(
@@ -301,7 +348,8 @@ export function buildTestServices(): {
       clock,
       (work) => serial.execute(work),
     ),
-    validateSession: new ValidateSession(sessions, clock),
+    validateSession,
+    emailPasswordSecurity,
     controlPlane,
     administration,
   };
@@ -318,5 +366,6 @@ export function buildTestServices(): {
     controlPlaneRepository,
     workforceAdministration,
     platformAdministrationProvisioning,
+    emails,
   };
 }

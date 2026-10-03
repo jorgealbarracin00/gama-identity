@@ -22,6 +22,19 @@ import type {
 } from "../authentication/federated/ports/federated-identity-repository.js";
 import { Authenticate } from "../authentication/application/authenticate.js";
 import { InMemoryEmailCredentialRepository } from "../authentication/credentials/adapters/in-memory-email-credential-repository.js";
+import {
+  DisabledIdentityEmailService,
+  InMemoryEmailActionChallengeRepository,
+  InMemoryIdentitySecurityAttemptRepository,
+  ResendIdentityEmailService,
+  SecureEmailActionTokenGenerator,
+} from "../authentication/email-security/adapters.js";
+import { EmailPasswordSecurity } from "../authentication/email-security/application.js";
+import type {
+  EmailActionChallengeRepository,
+  IdentityEmailService,
+  IdentitySecurityAttemptRepository,
+} from "../authentication/email-security/ports.js";
 import { CreateEmailCredential } from "../authentication/credentials/application/use-cases.js";
 import { BaselinePasswordPolicy } from "../authentication/credentials/domain/password-policy.js";
 import { config } from "../config/index.js";
@@ -34,6 +47,10 @@ import { PostgresDatabase } from "../infrastructure/postgres/database.js";
 import { runMigrations } from "../infrastructure/postgres/migrations.js";
 import { PostgresHumanIdentityRepository } from "../infrastructure/postgres/postgres-human-identity-repository.js";
 import { PostgresEmailCredentialRepository } from "../infrastructure/postgres/postgres-email-credential-repository.js";
+import {
+  PostgresEmailActionChallengeRepository,
+  PostgresIdentitySecurityAttemptRepository,
+} from "../infrastructure/postgres/postgres-email-security-repositories.js";
 import {
   PostgresFederatedAuthenticationNonceRepository,
   PostgresFederatedIdentityRepository,
@@ -92,6 +109,7 @@ export interface IdentityServices {
   readonly logout: Logout;
   readonly renewSession: RenewSession;
   readonly validateSession: ValidateSession;
+  readonly emailPasswordSecurity: EmailPasswordSecurity;
   readonly controlPlane: ControlPlane;
   readonly administration: AdministrationServices;
 }
@@ -142,6 +160,8 @@ export async function buildRuntime(
   const federatedIdentities = new PostgresFederatedIdentityRepository(database);
   const federatedNonces = new PostgresFederatedAuthenticationNonceRepository(database);
   const controlPlaneRepository = new PostgresControlPlaneRepository(database);
+  const emailChallenges = new PostgresEmailActionChallengeRepository(database);
+  const securityAttempts = new PostgresIdentitySecurityAttemptRepository(database);
   const services = composeServices(
     runtimeConfig,
     identities,
@@ -149,6 +169,9 @@ export async function buildRuntime(
     sessions,
     federatedIdentities,
     federatedNonces,
+    emailChallenges,
+    securityAttempts,
+    createIdentityEmailService(runtimeConfig),
     controlPlaneRepository,
     new PostgresRegistrationCompensator(
       identities,
@@ -218,6 +241,8 @@ function buildMemoryRuntime(runtimeConfig: Config = config): ApplicationRuntime 
   const federatedIdentities = new InMemoryFederatedIdentityRepository();
   const federatedNonces = new InMemoryFederatedAuthenticationNonceRepository();
   const controlPlaneRepository = new InMemoryControlPlaneRepository();
+  const emailChallenges = new InMemoryEmailActionChallengeRepository();
+  const securityAttempts = new InMemoryIdentitySecurityAttemptRepository();
   const serial = new SerialExecutor();
   const services = composeServices(
     runtimeConfig,
@@ -226,6 +251,9 @@ function buildMemoryRuntime(runtimeConfig: Config = config): ApplicationRuntime 
     sessions,
     federatedIdentities,
     federatedNonces,
+    emailChallenges,
+    securityAttempts,
+    createIdentityEmailService(runtimeConfig),
     controlPlaneRepository,
     new InMemoryRegistrationCompensator(
       identities,
@@ -307,6 +335,9 @@ function composeServices(
   sessions: SessionRepository,
   federatedIdentities: FederatedIdentityRepository,
   federatedNonces: FederatedAuthenticationNonceRepository,
+  emailChallenges: EmailActionChallengeRepository,
+  securityAttempts: IdentitySecurityAttemptRepository,
+  identityEmailService: IdentityEmailService,
   controlPlaneRepository: ControlPlaneRepository,
   compensator: RegistrationCompensator,
   clock = new SystemClock(),
@@ -322,6 +353,7 @@ function composeServices(
   logout: Logout;
   renewSession: RenewSession;
   validateSession: ValidateSession;
+  emailPasswordSecurity: EmailPasswordSecurity;
 } {
   const passwordOperations = createPasswordOperations(runtimeConfig);
 
@@ -350,6 +382,29 @@ function composeServices(
     runtimeConfig.SESSION_DURATION_SECONDS,
     renewalTokens,
     runtimeConfig.SESSION_RENEWAL_DURATION_SECONDS,
+  );
+  const validateSession = new ValidateSession(sessions, clock);
+  const emailPasswordSecurity = new EmailPasswordSecurity(
+    credentials,
+    sessions,
+    validateSession,
+    emailChallenges,
+    securityAttempts,
+    identityEmailService,
+    runtimeConfig.IDENTITY_TRUSTED_APPS,
+    new SecureEmailActionTokenGenerator(),
+    new BaselinePasswordPolicy(),
+    passwordOperations,
+    clock,
+    {
+      defaultAppId: runtimeConfig.IDENTITY_DEFAULT_APP_ID,
+      verificationTtlSeconds: runtimeConfig.IDENTITY_EMAIL_VERIFICATION_TTL_SECONDS,
+      passwordResetTtlSeconds: runtimeConfig.IDENTITY_PASSWORD_RESET_TTL_SECONDS,
+      rateLimitWindowSeconds: runtimeConfig.IDENTITY_RATE_LIMIT_WINDOW_SECONDS,
+      rateLimitMaximumAttempts: runtimeConfig.IDENTITY_RATE_LIMIT_MAXIMUM_ATTEMPTS,
+      rateLimitSecret: runtimeConfig.IDENTITY_RATE_LIMIT_SECRET,
+    },
+    atomically,
   );
   const appleVerifier = runtimeConfig.APPLE_CLIENT_IDS.length === 0
     ? new UnavailableFederatedIdentityTokenVerifier(APPLE_FEDERATED_PROVIDER)
@@ -419,8 +474,19 @@ function composeServices(
     federatedAuthenticationMethods,
     logout: new Logout(sessions),
     renewSession: new RenewSession(sessions, createSession, renewalTokens, clock, atomically),
-    validateSession: new ValidateSession(sessions, clock),
+    validateSession,
+    emailPasswordSecurity,
   };
+}
+
+function createIdentityEmailService(runtimeConfig: Config): IdentityEmailService {
+  if (runtimeConfig.IDENTITY_EMAIL_PROVIDER === "resend") {
+    return new ResendIdentityEmailService(
+      runtimeConfig.RESEND_API_KEY!,
+      runtimeConfig.IDENTITY_EMAIL_FROM!,
+    );
+  }
+  return new DisabledIdentityEmailService();
 }
 
 function googleWebConfiguration(runtimeConfig: Config): {
