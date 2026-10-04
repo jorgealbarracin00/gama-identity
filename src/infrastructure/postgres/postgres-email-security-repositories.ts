@@ -114,11 +114,11 @@ implements IdentitySecurityAttemptRepository {
          SELECT count(*)::int AS count
          FROM identity_security_attempts, (SELECT count(*) FROM locks) acquired
          WHERE action = $1
-           AND occurred_at >= $4 - make_interval(secs => $5)
+           AND occurred_at >= $4::timestamptz - make_interval(secs => $5::int)
            AND (subject_hash = $2 OR ip_hash = $3)
        ), inserted AS (
          INSERT INTO identity_security_attempts (action, subject_hash, ip_hash, occurred_at)
-         SELECT $1, $2, $3, $4 FROM recent WHERE count < $6
+         SELECT $1, $2, $3, $4::timestamptz FROM recent WHERE count < $6
          RETURNING 1
        )
        SELECT EXISTS (SELECT 1 FROM inserted) AS accepted`,
