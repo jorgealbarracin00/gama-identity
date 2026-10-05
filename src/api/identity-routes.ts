@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
 
@@ -339,6 +340,22 @@ export function identityRoutes(
       } catch (error) {
         throw translateAuthenticationMethodsError(error);
       }
+    });
+
+    app.post("/products/grocery-master/apple-revocation", async (request, reply) => {
+      const configured = services.groceryAppleRevocation;
+      if (!configured) throw new AppError("Apple revocation is not configured", "APPLE_REVOCATION_UNAVAILABLE", 503);
+      const supplied = request.headers["x-grocery-service-token"];
+      if (typeof supplied !== "string" || !timingSafeEqual(createHash("sha256").update(supplied).digest(),
+        createHash("sha256").update(configured.serviceToken).digest())) {
+        throw new AppError("Service authorization required", "UNAUTHORIZED", 401);
+      }
+      const body = z.object({ principalId: z.string().min(1).max(200), operationId: z.string().uuid(),
+        proof: z.object({ authorizationCode: z.string().min(1).max(4096), nonce: z.string().regex(/^[A-Za-z0-9_-]{32,256}$/) }).strict().optional(),
+      }).strict().safeParse(request.body);
+      if (!body.success) throw new AppError("Invalid deletion request", "INVALID_REQUEST", 400);
+      await configured.service.execute(body.data.principalId, body.data.operationId, body.data.proof);
+      return reply.status(204).send();
     });
 
     app.post("/logout", async (request, reply) => {

@@ -580,3 +580,42 @@ git push origin v1.1.0
 
 Version `v1.1.0` adds interchangeable PostgreSQL persistence without changing
 the public identity API.
+
+
+## Grocery Master Apple deletion contract
+
+`POST /products/grocery-master/apple-revocation` is a server-only endpoint. It
+requires `X-Grocery-Service-Token`, a validated Grocery principal supplied by the
+Grocery backend, a durable UUID `operationId`, and optionally `proof` containing
+`authorizationCode` and the raw `nonce` from fresh native Apple authorization.
+It never deletes or disables the shared Human Identity, provider relationship,
+other sessions, or other products. Grocery applies its own session cutoff using
+`authenticatedAt`, which survives GAMA session renewal. Do not substitute a
+rotated session's `createdAt` for this value.
+
+Configure all five secrets together in PostgreSQL mode:
+`GROCERY_REVOCATION_SERVICE_TOKEN` (at least 32 random characters),
+`GROCERY_APPLE_TEAM_ID`, `GROCERY_APPLE_KEY_ID`, `GROCERY_APPLE_PRIVATE_KEY`, and
+`GROCERY_APPLE_GRANT_ENCRYPTION_KEY` (base64 encoding of 32 random bytes).
+The first token must equal Grocery backend's
+`GAMA_GROCERY_REVOCATION_SERVICE_TOKEN`. The Apple key must authorize Sign in with
+Apple for `com.gamadynamics.GroceryMaster`; these are not App Store Server API
+credentials. The client identifier is fixed server-side. No Apple web redirect
+URI is used for native authorization codes. Do not rotate the encryption key
+until pending grants have completed, or retain a key migration path.
+
+Apple-linked accounts without a stored retry grant receive `409
+APPLE_REAUTH_REQUIRED`. Exchange verifies the returned Apple identity token's
+signature, issuer, Grocery audience, nonce and linked subject. Only encrypted
+refresh tokens are persisted. Apple `/auth/revoke` must succeed before a receipt
+is completed and its encrypted credential erased. Repeating an operation after
+a lost response is safe; a new operation is required after a new account login.
+If a crash occurs between code exchange and durable grant storage, the user must
+confirm with Apple again because authorization codes are single-use.
+
+Before deployment, verify Apple's Sign in with Apple app grouping. Apple may
+revoke authorizations across grouped apps. Grocery must have the intended
+independent Apple authorization boundary; do not deploy a grouping that revokes
+unrelated products. This cannot be inferred from repository configuration.
+Deploy this service and migration 011 before deploying Grocery's deletion flow.
+Live Apple revocation still requires real Apple/device validation.

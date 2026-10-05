@@ -68,6 +68,11 @@ const environmentSchema = z.object({
     }
     return clientIds;
   }),
+  GROCERY_REVOCATION_SERVICE_TOKEN: z.string().min(32).optional(),
+  GROCERY_APPLE_TEAM_ID: z.string().regex(/^[A-Z0-9]{10}$/u).optional(),
+  GROCERY_APPLE_KEY_ID: z.string().regex(/^[A-Z0-9]{10}$/u).optional(),
+  GROCERY_APPLE_PRIVATE_KEY: z.string().min(1).optional(),
+  GROCERY_APPLE_GRANT_ENCRYPTION_KEY: z.string().regex(/^[A-Za-z0-9+/]{43}=$/u).optional(),
   APPLE_WEB_CLIENT_ID: z.string().trim().min(1).optional(),
   APPLE_WEB_REDIRECT_URI: z.string().url().startsWith("https://").optional(),
   APPLE_TEAM_ID: z.string().regex(/^[A-Z0-9]{10}$/u).optional(),
@@ -124,6 +129,12 @@ const environmentSchema = z.object({
       path: ["DATABASE_URL"],
       message: "DATABASE_URL is required when REPOSITORY_MODE is postgres",
     });
+  }
+  const groceryRevocationValues = [environment.GROCERY_REVOCATION_SERVICE_TOKEN, environment.GROCERY_APPLE_TEAM_ID,
+    environment.GROCERY_APPLE_KEY_ID, environment.GROCERY_APPLE_PRIVATE_KEY, environment.GROCERY_APPLE_GRANT_ENCRYPTION_KEY];
+  if (groceryRevocationValues.some((value) => value !== undefined) &&
+      (groceryRevocationValues.some((value) => value === undefined) || environment.REPOSITORY_MODE !== "postgres")) {
+    context.addIssue({ code: "custom", message: "Grocery Apple revocation requires PostgreSQL and all five GROCERY revocation settings" });
   }
   const appleWebValues = [
     environment.APPLE_WEB_CLIENT_ID,

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { PostgresAppleRevocationStore } from "../../src/infrastructure/postgres/postgres-apple-revocation-store.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, it } from "node:test";
 
@@ -78,7 +80,23 @@ describe(
       const result = await database.query(
         "SELECT version FROM schema_migrations ORDER BY version",
       );
-      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010"]);
+      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011"]);
+    });
+
+    it("persists encrypted Apple revocation retries and erases tokens after completion", async () => {
+      const identity = HumanIdentity.create(new UuidHumanIdentityIdGenerator(), new SystemClock());
+      await identities.save(identity);
+      const store = new PostgresAppleRevocationStore(database);
+      const record = { operationId: randomUUID(), principalId: identity.id.value,
+        clientId: "com.gamadynamics.GroceryMaster", encryptedToken: "test-encrypted-grant", completedAt: null };
+      await store.save(record);
+      const restarted = new PostgresAppleRevocationStore(database);
+      assert.deepEqual(await restarted.find(record.operationId), record);
+      await restarted.complete(record.operationId);
+      await restarted.complete(record.operationId);
+      assert.equal((await store.find(record.operationId))?.encryptedToken, null);
+      assert.ok((await store.find(record.operationId))?.completedAt);
+      assert.equal((await identities.findById(identity.id))?.status, "active");
     });
 
     it("starts and closes a PostgreSQL runtime after a connectivity check", async () => {

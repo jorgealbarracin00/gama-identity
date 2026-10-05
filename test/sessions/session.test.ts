@@ -94,6 +94,8 @@ describe("Session lifecycle", () => {
     ).execute(original.renewalToken);
 
     assert.notEqual(renewed.sessionId, original.sessionId);
+    assert.equal(renewed.authenticatedAt, original.authenticatedAt);
+    assert.notEqual(renewed.createdAt, original.createdAt);
     assert.notEqual(renewed.renewalToken, original.renewalToken);
     assert.equal(renewed.humanIdentityId, original.humanIdentityId);
     assert.deepEqual(

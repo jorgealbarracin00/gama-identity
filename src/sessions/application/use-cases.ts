@@ -12,6 +12,7 @@ export interface SessionMetadata {
   readonly sessionId: string;
   readonly humanIdentityId: string;
   readonly createdAt: string;
+  readonly authenticatedAt: string;
   readonly lastAccessedAt: string;
   readonly expiresAt: string;
 }
@@ -32,6 +33,7 @@ function metadata(session: Session): SessionMetadata {
     sessionId: session.id.value,
     humanIdentityId: session.humanIdentityId.value,
     createdAt: session.createdAt.toISOString(),
+    authenticatedAt: session.authenticatedAt.toISOString(),
     lastAccessedAt: session.lastAccessedAt.toISOString(),
     expiresAt: session.expiresAt.toISOString(),
   };
@@ -47,7 +49,7 @@ export class CreateSession {
     private readonly renewalDurationSeconds = 2_592_000,
   ) {}
 
-  async execute(humanIdentityId: HumanIdentityId): Promise<CreatedSession> {
+  async execute(humanIdentityId: HumanIdentityId, authenticatedAt?: Date): Promise<CreatedSession> {
     const renewalToken = this.renewalTokens.next();
     const session = Session.create(
       this.idGenerator,
@@ -56,6 +58,7 @@ export class CreateSession {
       renewalToken.hash,
       this.renewalDurationSeconds,
       this.clock,
+      authenticatedAt,
     );
     await this.repository.save(session);
     return {
@@ -105,7 +108,7 @@ export class RenewSession {
       }
       previous.revoke();
       await this.repository.save(previous);
-      return this.createSession.execute(previous.humanIdentityId);
+      return this.createSession.execute(previous.humanIdentityId, previous.authenticatedAt);
     });
   }
 }

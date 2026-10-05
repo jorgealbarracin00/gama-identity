@@ -40,6 +40,7 @@ describe("registration and login orchestration", () => {
     });
     assert.equal(session.sessionId, "session-2");
     assert.deepEqual(Object.keys(session).sort(), [
+      "authenticatedAt",
       "createdAt",
       "expiresAt",
       "humanIdentityId",

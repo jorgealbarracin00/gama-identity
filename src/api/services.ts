@@ -1,3 +1,6 @@
+import { ProductAppleRevocation } from "../authentication/federated/application/product-apple-revocation.js";
+import { NativeProductAppleTokens } from "../authentication/federated/adapters/product-apple-tokens.js";
+import { PostgresAppleRevocationStore } from "../infrastructure/postgres/postgres-apple-revocation-store.js";
 import { Argon2PasswordOperations } from "../authentication/adapters/argon2-password-operations.js";
 import { AppleIdentityTokenVerifier, APPLE_FEDERATED_PROVIDER } from "../authentication/federated/adapters/apple-identity-token-verifier.js";
 import { AppleWebAuthorizationCodeExchanger } from "../authentication/federated/adapters/apple-authorization-code-exchanger.js";
@@ -97,6 +100,7 @@ export interface AdministrationServices {
 }
 
 export interface IdentityServices {
+  readonly groceryAppleRevocation?: { serviceToken: string; service: ProductAppleRevocation };
   readonly register: {
     execute(input: CredentialsInput): Promise<RegistrationResult>;
   };
@@ -216,6 +220,16 @@ export async function buildRuntime(
   return {
     services: {
       ...services,
+      ...(runtimeConfig.GROCERY_REVOCATION_SERVICE_TOKEN === undefined ? {} : {
+        groceryAppleRevocation: { serviceToken: runtimeConfig.GROCERY_REVOCATION_SERVICE_TOKEN,
+          service: new ProductAppleRevocation("com.gamadynamics.GroceryMaster", federatedIdentities,
+            new AppleIdentityTokenVerifier({ clientIds: ["com.gamadynamics.GroceryMaster"] }),
+            new PostgresAppleRevocationStore(database), new NativeProductAppleTokens({
+              clientId: "com.gamadynamics.GroceryMaster", teamId: runtimeConfig.GROCERY_APPLE_TEAM_ID!,
+              keyId: runtimeConfig.GROCERY_APPLE_KEY_ID!, privateKey: runtimeConfig.GROCERY_APPLE_PRIVATE_KEY!,
+              encryptionKey: runtimeConfig.GROCERY_APPLE_GRANT_ENCRYPTION_KEY!,
+            })) },
+      }),
       register: new TransactionalRegister(services.register, database),
       controlPlane,
       administration,

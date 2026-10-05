@@ -10,6 +10,7 @@ export interface SessionSnapshot {
   readonly id: SessionId;
   readonly humanIdentityId: HumanIdentityId;
   readonly createdAt: Date;
+  readonly authenticatedAt?: Date;
   readonly lastAccessedAt: Date;
   readonly expiresAt: Date;
   readonly status: SessionStatus;
@@ -27,6 +28,7 @@ export class Session {
     private lifecycleStatus: SessionStatus,
     private readonly renewalHash: string | null,
     private readonly renewalExpirationTime: Date | null,
+    private readonly authenticationTime: Date,
   ) {}
 
   static create(
@@ -36,6 +38,7 @@ export class Session {
     renewalTokenHash: string,
     renewalDurationSeconds: number,
     clock: Clock,
+    authenticatedAt?: Date,
   ): Session {
     if (!Number.isInteger(durationSeconds) || durationSeconds <= 0 ||
         !Number.isInteger(renewalDurationSeconds) || renewalDurationSeconds <= durationSeconds) {
@@ -51,6 +54,7 @@ export class Session {
       "active",
       renewalTokenHash,
       new Date(now.getTime() + renewalDurationSeconds * 1000),
+      new Date(authenticatedAt ?? now),
     );
   }
 
@@ -64,12 +68,14 @@ export class Session {
       snapshot.status,
       snapshot.renewalTokenHash,
       snapshot.renewalExpiresAt === null ? null : new Date(snapshot.renewalExpiresAt),
+      new Date(snapshot.authenticatedAt ?? snapshot.createdAt),
     );
   }
 
   get id(): SessionId { return this.sessionId; }
   get humanIdentityId(): HumanIdentityId { return this.ownerId; }
   get status(): SessionStatus { return this.lifecycleStatus; }
+  get authenticatedAt(): Date { return new Date(this.authenticationTime); }
   get createdAt(): Date { return new Date(this.creationTime); }
   get lastAccessedAt(): Date { return new Date(this.lastAccessTime); }
   get expiresAt(): Date { return new Date(this.expirationTime); }
@@ -124,6 +130,7 @@ export class Session {
       this.lifecycleStatus,
       this.renewalHash,
       this.renewalExpiresAt,
+      this.authenticatedAt,
     );
   }
 
@@ -132,6 +139,7 @@ export class Session {
       id: this.sessionId,
       humanIdentityId: this.ownerId,
       createdAt: this.createdAt,
+      authenticatedAt: this.authenticatedAt,
       lastAccessedAt: this.lastAccessedAt,
       expiresAt: this.expiresAt,
       status: this.lifecycleStatus,

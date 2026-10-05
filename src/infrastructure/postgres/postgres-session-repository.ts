@@ -11,6 +11,7 @@ interface SessionRow {
   id: string;
   human_identity_id: string;
   created_at: Date;
+  authenticated_at: Date;
   last_accessed_at: Date;
   expires_at: Date;
   status: SessionStatus;
@@ -26,9 +27,9 @@ export class PostgresSessionRepository implements SessionRepository {
     await this.database.query(
       `INSERT INTO sessions (
          id, human_identity_id, created_at, last_accessed_at,
-         expires_at, status, renewal_token_hash, renewal_expires_at
+         expires_at, status, renewal_token_hash, renewal_expires_at, authenticated_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (id) DO UPDATE SET
          last_accessed_at = EXCLUDED.last_accessed_at,
          status = EXCLUDED.status,
@@ -43,6 +44,7 @@ export class PostgresSessionRepository implements SessionRepository {
         snapshot.status,
         snapshot.renewalTokenHash,
         snapshot.renewalExpiresAt,
+        snapshot.authenticatedAt ?? snapshot.createdAt,
       ],
     );
   }
@@ -104,7 +106,7 @@ export class PostgresSessionRepository implements SessionRepository {
 
 const selectSession = `
   SELECT id, human_identity_id, created_at, last_accessed_at,
-         expires_at, status, renewal_token_hash, renewal_expires_at
+         expires_at, status, renewal_token_hash, renewal_expires_at, authenticated_at
   FROM sessions
 `;
 
@@ -115,6 +117,7 @@ function toSession(row: SessionRow | undefined): Session | null {
         id: SessionId.from(row.id),
         humanIdentityId: HumanIdentityId.from(row.human_identity_id),
         createdAt: row.created_at,
+        authenticatedAt: row.authenticated_at,
         lastAccessedAt: row.last_accessed_at,
         expiresAt: row.expires_at,
         status: row.status,
