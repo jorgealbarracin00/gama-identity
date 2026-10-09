@@ -29,6 +29,36 @@ const trustedIdentityAppsSchema = z.array(z.object({
   }
 });
 
+const webIdentityAppsSchema = z.array(z.object({
+  appId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+  purpose: z.enum(["preview", "production"]),
+  allowedPrincipalIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
+  apple: z.object({
+    clientId: z.string().trim().min(1),
+    redirectUri: z.string().url().startsWith("https://"),
+    teamId: z.string().regex(/^[A-Z0-9]{10}$/u),
+    keyId: z.string().regex(/^[A-Z0-9]{10}$/u),
+    privateKey: z.string().min(1),
+  }).strict().optional(),
+  google: z.object({
+    clientId: z.string().trim().min(1),
+    clientSecret: z.string().min(1),
+    redirectUri: z.string().url().startsWith("https://"),
+  }).strict().optional(),
+}).strict()).max(20).superRefine((apps, context) => {
+  if (new Set(apps.map((app) => app.appId)).size !== apps.length) {
+    context.addIssue({ code: "custom", message: "Web identity app IDs must be unique" });
+  }
+  for (const app of apps) {
+    if (app.purpose === "preview" && app.allowedPrincipalIds === undefined) {
+      context.addIssue({ code: "custom", message: "Preview web identity apps require existing authorized principals" });
+    }
+    if (app.apple === undefined && app.google === undefined) {
+      context.addIssue({ code: "custom", message: "Web identity apps require a configured provider" });
+    }
+  }
+});
+
 const defaultTrustedApps = JSON.stringify([{
   id: "coco-web",
   displayName: "Coco the Llama",
@@ -100,6 +130,20 @@ const environmentSchema = z.object({
       return result.data;
     } catch {
       context.addIssue({ code: "custom", message: "IDENTITY_TRUSTED_APPS must be valid JSON" });
+      return z.NEVER;
+    }
+  }),
+  // Optional additive registry. Empty preserves all legacy/native behaviour.
+  IDENTITY_WEB_APPS: z.string().default("[]").transform((value, context) => {
+    try {
+      const result = webIdentityAppsSchema.safeParse(JSON.parse(value));
+      if (!result.success) {
+        context.addIssue({ code: "custom", message: "Invalid web identity app registry" });
+        return z.NEVER;
+      }
+      return result.data;
+    } catch {
+      context.addIssue({ code: "custom", message: "Web identity app registry must be valid JSON" });
       return z.NEVER;
     }
   }),
@@ -183,6 +227,27 @@ const environmentSchema = z.object({
       path: ["GOOGLE_CLIENT_IDS"],
       message: "GOOGLE_CLIENT_IDS must include GOOGLE_WEB_CLIENT_ID",
     });
+  }
+  for (const app of environment.IDENTITY_WEB_APPS) {
+    const trusted = environment.IDENTITY_TRUSTED_APPS.find((candidate) => candidate.id === app.appId);
+    if (trusted === undefined) {
+      context.addIssue({ code: "custom", path: ["IDENTITY_WEB_APPS"], message: "Web identity apps must identify a trusted application" });
+      continue;
+    }
+    for (const provider of ["apple", "google"] as const) {
+      const configured = app[provider];
+      if (configured === undefined) continue;
+      const approvedClientIds = provider === "apple" ? environment.APPLE_CLIENT_IDS : environment.GOOGLE_CLIENT_IDS;
+      // A preview client is scoped to this registry; admitting it through the
+      // unrestricted legacy token endpoint would bypass its creation policy.
+      if (app.purpose === "preview" && (approvedClientIds.includes(configured.clientId) ||
+        environment.IDENTITY_WEB_APPS.some((other) => other.purpose === "production" && other[provider]?.clientId === configured.clientId))) {
+        context.addIssue({ code: "custom", path: ["IDENTITY_WEB_APPS"], message: "Preview clients must be separate from unrestricted provider audiences" });
+      }
+      if (configured.redirectUri !== `${trusted.baseUrl}/api/auth/${provider}/callback`) {
+        context.addIssue({ code: "custom", path: ["IDENTITY_WEB_APPS"], message: "Web identity callback must match its trusted application origin and provider path" });
+      }
+    }
   }
   if (!environment.IDENTITY_TRUSTED_APPS.some((app) => app.id === environment.IDENTITY_DEFAULT_APP_ID)) {
     context.addIssue({

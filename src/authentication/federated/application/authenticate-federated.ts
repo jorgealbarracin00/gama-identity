@@ -44,6 +44,7 @@ export class AuthenticateFederated {
     private readonly createSession: CreateSession,
     private readonly clock: Clock,
     private readonly atomically: <T>(work: () => Promise<T>) => Promise<T>,
+    private readonly permittedExistingPrincipals?: ReadonlySet<string>,
   ) {}
 
   async execute(input: FederatedAuthenticationInput): Promise<FederatedAuthenticationResult> {
@@ -85,6 +86,12 @@ export class AuthenticateFederated {
       verified.provider,
       verified.providerSubject,
     );
+    // Registered previews may authenticate only already-linked, approved test
+    // Humans. This guard runs before any identity/link/session/metadata mutation.
+    if (this.permittedExistingPrincipals !== undefined &&
+        (existing === null || !this.permittedExistingPrincipals.has(existing.humanIdentityId.value))) {
+      throw new FederatedAuthenticationError("IDENTITY_UNAVAILABLE");
+    }
     if (existing !== null) {
       if (existing.status !== "active") {
         throw new FederatedAuthenticationError("FEDERATED_IDENTITY_UNAVAILABLE");

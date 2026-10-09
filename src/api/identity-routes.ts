@@ -30,10 +30,12 @@ const federatedCredentialSchema = z.object({
   nonce: z.string().min(32).max(256),
 }).strict();
 const appleWebCredentialSchema = z.object({
+  appId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u).optional(),
   authorizationCode: z.string().min(1).max(4_096),
   nonce: z.string().min(32).max(256),
 }).strict();
 const googleWebCredentialSchema = z.object({
+  appId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u).optional(),
   authorizationCode: z.string().min(1).max(4_096),
   nonce: z.string().min(32).max(256),
   codeVerifier: z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/u),
@@ -129,7 +131,10 @@ export function identityRoutes(
       if (!credential.success) {
         throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
       }
-      if (services.authenticateAppleWeb === undefined) {
+      const authentication = credential.data.appId === undefined
+        ? services.authenticateAppleWeb
+        : services.webAuthenticationApps?.get(credential.data.appId)?.apple;
+      if (authentication === undefined) {
         throw new AppError(
           "Apple web authentication is temporarily unavailable",
           "APPLE_WEB_AUTHENTICATION_UNAVAILABLE",
@@ -137,7 +142,7 @@ export function identityRoutes(
         );
       }
       try {
-        const result = await services.authenticateAppleWeb.execute(credential.data);
+        const result = await authentication.execute({ authorizationCode: credential.data.authorizationCode, nonce: credential.data.nonce });
         return reply.send({
           session: result.session,
           account: { email: result.providerEmail },
@@ -170,7 +175,10 @@ export function identityRoutes(
       if (!credential.success) {
         throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
       }
-      if (services.authenticateGoogleWeb === undefined) {
+      const authentication = credential.data.appId === undefined
+        ? services.authenticateGoogleWeb
+        : services.webAuthenticationApps?.get(credential.data.appId)?.google;
+      if (authentication === undefined) {
         throw new AppError(
           "Google web authentication is temporarily unavailable",
           "GOOGLE_WEB_AUTHENTICATION_UNAVAILABLE",
@@ -178,7 +186,7 @@ export function identityRoutes(
         );
       }
       try {
-        const result = await services.authenticateGoogleWeb.execute(credential.data);
+        const result = await authentication.execute({ authorizationCode: credential.data.authorizationCode, nonce: credential.data.nonce, codeVerifier: credential.data.codeVerifier });
         return reply.send({
           session: result.session,
           account: { email: result.providerEmail },

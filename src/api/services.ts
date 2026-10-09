@@ -108,6 +108,7 @@ export interface IdentityServices {
   readonly authenticateFederated: AuthenticateFederated;
   readonly authenticateAppleWeb?: AuthenticateAppleWeb;
   readonly authenticateGoogleWeb?: AuthenticateGoogleWeb;
+  readonly webAuthenticationApps?: ReadonlyMap<string, { apple?: AuthenticateAppleWeb; google?: AuthenticateGoogleWeb }>;
   readonly resolveFederatedIdentity: ResolveFederatedIdentity;
   readonly federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   readonly logout: Logout;
@@ -362,6 +363,7 @@ function composeServices(
   authenticateFederated: AuthenticateFederated;
   authenticateAppleWeb?: AuthenticateAppleWeb;
   authenticateGoogleWeb?: AuthenticateGoogleWeb;
+  webAuthenticationApps?: ReadonlyMap<string, { apple?: AuthenticateAppleWeb; google?: AuthenticateGoogleWeb }>;
   resolveFederatedIdentity: ResolveFederatedIdentity;
   federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   logout: Logout;
@@ -452,6 +454,33 @@ function composeServices(
       new GoogleWebAuthorizationCodeExchanger(googleWebConfig),
       authenticateFederated,
     );
+  const webAuthenticationApps = new Map<string, { apple?: AuthenticateAppleWeb; google?: AuthenticateGoogleWeb }>();
+  for (const registeredApp of runtimeConfig.IDENTITY_WEB_APPS) {
+    const registered: { apple?: AuthenticateAppleWeb; google?: AuthenticateGoogleWeb } = {};
+    // Each exchange validates only its registered client audience while sharing
+    // canonical Human resolution and durable provider nonce replay protection.
+    if (registeredApp.apple !== undefined) {
+      const authentication = new AuthenticateFederated(
+        new FederatedIdentityTokenVerifiers([new AppleIdentityTokenVerifier({ clientIds: [registeredApp.apple.clientId] })]),
+        federatedIdentities, federatedNonces, identities,
+        new UuidHumanIdentityIdGenerator(), new UuidFederatedIdentityIdGenerator(),
+        createSession, clock, atomically,
+        registeredApp.allowedPrincipalIds === undefined ? undefined : new Set(registeredApp.allowedPrincipalIds),
+      );
+      registered.apple = new AuthenticateAppleWeb(new AppleWebAuthorizationCodeExchanger(registeredApp.apple), authentication);
+    }
+    if (registeredApp.google !== undefined) {
+      const authentication = new AuthenticateFederated(
+        new FederatedIdentityTokenVerifiers([new GoogleIdentityTokenVerifier({ clientIds: [registeredApp.google.clientId] })]),
+        federatedIdentities, federatedNonces, identities,
+        new UuidHumanIdentityIdGenerator(), new UuidFederatedIdentityIdGenerator(),
+        createSession, clock, atomically,
+        registeredApp.allowedPrincipalIds === undefined ? undefined : new Set(registeredApp.allowedPrincipalIds),
+      );
+      registered.google = new AuthenticateGoogleWeb(new GoogleWebAuthorizationCodeExchanger(registeredApp.google), authentication);
+    }
+    webAuthenticationApps.set(registeredApp.appId, registered);
+  }
   const resolveFederatedIdentity = new ResolveFederatedIdentity(
     federatedVerifiers,
     federatedIdentities,
@@ -484,6 +513,7 @@ function composeServices(
     authenticateFederated,
     ...(authenticateAppleWeb === undefined ? {} : { authenticateAppleWeb }),
     ...(authenticateGoogleWeb === undefined ? {} : { authenticateGoogleWeb }),
+    ...(webAuthenticationApps.size === 0 ? {} : { webAuthenticationApps }),
     resolveFederatedIdentity,
     federatedAuthenticationMethods,
     logout: new Logout(sessions),
