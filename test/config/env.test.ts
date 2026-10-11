@@ -138,3 +138,14 @@ describe("environment configuration", () => {
     assert.throws(() => loadConfig({ REPOSITORY_MODE: "filesystem" }));
   });
 });
+
+describe("private Google verification scope", () => {
+  it("is absent by default and admits only one distinct UUID pair", () => {
+    assert.equal(loadConfig({}).IDENTITY_GOOGLE_VERIFICATION_SCOPE, undefined);
+    const scope={source:"22222222-2222-4222-8222-222222222222",target:"11111111-1111-4111-8111-111111111111"};
+    assert.deepEqual(loadConfig({IDENTITY_GOOGLE_VERIFICATION_SCOPE:JSON.stringify(scope)}).IDENTITY_GOOGLE_VERIFICATION_SCOPE,scope);
+    for(const invalid of ["not-json", JSON.stringify({source:scope.source,target:scope.source}),JSON.stringify({...scope,transferEnabled:true}),JSON.stringify({source:"wrong",target:scope.target})]) {
+      assert.throws(()=>loadConfig({IDENTITY_GOOGLE_VERIFICATION_SCOPE:invalid}));
+    }
+  });
+});

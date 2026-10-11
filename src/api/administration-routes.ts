@@ -15,6 +15,13 @@ const inspectionRequest = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("details"), humanIdentityIds: z.array(z.string().min(1).max(200)).min(1).max(2) }).strict(),
 ]);
 
+const googleVerificationRequest = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("inspect") }).strict(),
+  z.object({ mode: z.literal("prepare") }).strict(),
+  z.object({ mode: z.literal("cancel"), caseId: z.uuid() }).strict(),
+  z.object({ mode: z.literal("approve"), caseId: z.uuid(), reviewDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+]);
+
 const tenantPath = z.object({ tenantId: z.string().min(1) });
 const tenantProductPath = tenantPath.extend({ productId: z.string().min(1) });
 const memberPath = tenantPath.extend({ humanIdentityId: z.string().min(1) });
@@ -43,6 +50,15 @@ const addTeamMember = z.union([
 
 export function administrationRoutes(services: IdentityServices): FastifyPluginAsync {
   return async (app) => {
+    app.post("/administration/platform/google-recovery", async (request, reply) => {
+      reply.header("Cache-Control", "no-store");
+      const sessionId = bearerSessionId(request);
+      const input = parse(googleVerificationRequest, request.body);
+      const verification = services.administration.googleVerification;
+      if (!verification) throw new AppError("Scoped verification is unavailable", "RECOVERY_VERIFICATION_UNAVAILABLE", 503);
+      return reply.send(await administer(() => verification.administer(sessionId, input)));
+    });
+
     // POST keeps personal search text out of request URLs and normal access logs.
     // Inspection has no domain writes; its only write is an accountable audit event.
     app.post("/administration/platform/identities/inspect", async (request, reply) => {

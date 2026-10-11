@@ -1,3 +1,4 @@
+import type { GoogleLinkObserver } from "../../../control-plane/application/google-recovery-verification.js";
 import { randomUUID } from "node:crypto";
 
 import type { EmailCredentialRepository } from "../../credentials/ports/email-credential-repository.js";
@@ -89,6 +90,7 @@ export class ManageFederatedAuthenticationMethods {
     private readonly clock: Clock,
     private readonly atomically: <T>(work: () => Promise<T>) => Promise<T>,
     private readonly linkPolicy?: FederatedLinkPolicy,
+    private readonly observation?: GoogleLinkObserver,
   ) {}
 
   async preflightLink(sessionId: SessionId): Promise<HumanIdentityId> {
@@ -119,6 +121,11 @@ export class ManageFederatedAuthenticationMethods {
       throw new FederatedAuthenticationError("PROVIDER_UNSUPPORTED");
     }
     const verified = await this.verifiers.verify(provider, input);
+    // The observation transaction commits evidence before the unchanged conflict
+    // is emitted. It must never fall through into linking for an armed case.
+    if (await this.observation?.observe(sessionId, verified)) {
+      throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_LINK_CONFLICT");
+    }
 
     try {
       return await this.atomically(() => this.completeLink(sessionId, verified, expectedHumanIdentityId));

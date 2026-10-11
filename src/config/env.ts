@@ -134,6 +134,18 @@ const environmentSchema = z.object({
     }
   }),
   // Optional additive registry. Empty preserves all legacy/native behaviour.
+  // Private operator binding. Absent by default; HTTP callers cannot select a pair.
+  IDENTITY_GOOGLE_VERIFICATION_SCOPE: z.string().optional().transform((value, context) => {
+    if (value === undefined) return undefined;
+    try {
+      const parsed = z.object({ source: z.uuid(), target: z.uuid() }).strict().safeParse(JSON.parse(value));
+      if (!parsed.success || parsed.data.source === parsed.data.target) throw new Error();
+      return parsed.data;
+    } catch {
+      context.addIssue({ code: "custom", message: "Google verification requires one distinct private Human pair" });
+      return z.NEVER;
+    }
+  }),
   IDENTITY_WEB_APPS: z.string().default("[]").transform((value, context) => {
     try {
       const result = webIdentityAppsSchema.safeParse(JSON.parse(value));

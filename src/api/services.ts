@@ -1,3 +1,5 @@
+import { GoogleRecoveryVerification } from "../control-plane/application/google-recovery-verification.js";
+import { PostgresGoogleVerificationStore } from "../infrastructure/postgres/postgres-google-verification-store.js";
 import { IdentityExplorer, type IdentityInspectionRepository } from "../control-plane/application/identity-explorer.js";
 import { PostgresIdentityInspectionRepository } from "../infrastructure/postgres/postgres-identity-inspection-repository.js";
 import { MemoryIdentityInspectionRepository } from "../control-plane/adapters/memory-identity-inspection-repository.js";
@@ -101,6 +103,7 @@ import { SerialExecutor } from "../shared/serial-executor.js";
 export interface AdministrationServices {
   readonly platform: PlatformAdministration;
   readonly identityExplorer: IdentityExplorer;
+  readonly googleVerification?: GoogleRecoveryVerification;
   readonly tenantTeam: TenantTeamAdministration;
 }
 
@@ -178,6 +181,18 @@ export async function buildRuntime(
   const controlPlaneRepository = new PostgresControlPlaneRepository(database);
   const emailChallenges = new PostgresEmailActionChallengeRepository(database);
   const securityAttempts = new PostgresIdentitySecurityAttemptRepository(database);
+  const verificationClock = new SystemClock();
+  const configuredScope = runtimeConfig.IDENTITY_GOOGLE_VERIFICATION_SCOPE;
+  const verificationScope = configuredScope === undefined ? undefined : Object.freeze({ ...configuredScope, appId: "cashcast-preview" as const });
+  const googleVerification = verificationScope === undefined ? undefined : new GoogleRecoveryVerification(
+    verificationScope,
+    new AdministrationPrincipals(controlPlaneRepository, identities,
+      new ControlPlane(controlPlaneRepository, identities, createPasswordOperations(runtimeConfig), verificationClock, work => database.withTransaction(work))),
+    identities, credentials, federatedIdentities, sessions, federatedNonces,
+    controlPlaneRepository, new PostgresGoogleVerificationStore(database, verificationScope), verificationClock,
+    work => database.withTransaction(work),
+    runtimeConfig.IDENTITY_WEB_APPS.some(app => app.appId === verificationScope.appId && app.purpose === "preview" &&
+      app.google !== undefined && app.allowedPrincipalIds?.includes(verificationScope.target) === true));
   const services = composeServices(
     runtimeConfig,
     identities,
@@ -196,6 +211,7 @@ export async function buildRuntime(
     ),
     new SystemClock(),
     (work) => database.withTransaction(work),
+    googleVerification,
   );
   const clock = new SystemClock();
   const controlPlane = new ControlPlane(
@@ -245,7 +261,7 @@ export async function buildRuntime(
       }),
       register: new TransactionalRegister(services.register, database),
       controlPlane,
-      administration,
+      administration: { ...administration, ...(googleVerification === undefined ? {} : { googleVerification }) },
     },
     databaseHealth: {
       async check() {
@@ -372,6 +388,7 @@ function composeServices(
   compensator: RegistrationCompensator,
   clock = new SystemClock(),
   atomically: <T>(work: () => Promise<T>) => Promise<T> = async (work) => work(),
+  googleVerification?: GoogleRecoveryVerification,
 ): {
   register: Register;
   login: Login;
@@ -502,6 +519,7 @@ function composeServices(
           federatedIdentities, federatedNonces, identities, credentials, sessions,
           controlPlaneRepository, new UuidFederatedIdentityIdGenerator(), clock, atomically,
           { allowedPrincipalIds: new Set(registeredApp.allowedPrincipalIds), allowReconciliation: false },
+          googleVerification,
         );
         registered.googleLink = new LinkGoogleWeb(new GoogleWebAuthorizationCodeExchanger(registeredApp.google), methods);
       }
