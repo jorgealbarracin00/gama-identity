@@ -1,3 +1,4 @@
+import { workloadAdministrationRoutes } from "./workload-administration-routes.js";
 import { googleRecoveryHandoffRoutes } from "./google-recovery-handoff-routes.js";
 import { identityManagementRoutes } from './identity-management-routes.js';
 import Fastify, { type FastifyInstance } from "fastify";
@@ -33,6 +34,7 @@ export function buildApp(
   app.register(identityRoutes(services));
   app.register(controlPlaneRoutes(services, controlPlane));
   app.register(administrationRoutes(services));
+  app.register(workloadAdministrationRoutes(services));
   app.register(consoleControlCentreRoutes(services));
   app.register(identityManagementRoutes(services));
   app.register(googleRecoveryHandoffRoutes(services));

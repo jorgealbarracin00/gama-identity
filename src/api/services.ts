@@ -1,3 +1,4 @@
+import { WorkloadAdministration } from "../control-plane/application/workload-administration.js";
 import { GoogleRecoveryHandoff } from "../control-plane/application/google-recovery-handoff.js";
 import { startGoogleRecoveryMaintenance } from "../control-plane/application/google-recovery-maintenance.js";
 import { IdentityManagement, syntheticManagementEnabled } from '../control-plane/application/identity-management.js';
@@ -107,6 +108,7 @@ import type { ControlPlaneRepository } from "../control-plane/ports/control-plan
 import { SerialExecutor } from "../shared/serial-executor.js";
 
 export interface AdministrationServices {
+  readonly workloads?: WorkloadAdministration;
   readonly controlCentre?: ConsoleControlCentre;
   readonly identityManagement?: IdentityManagement;
   readonly googleRecoveryHandoff?: GoogleRecoveryHandoff;
@@ -281,6 +283,7 @@ export async function buildRuntime(
       register: new TransactionalRegister(services.register, database),
       controlPlane,
       administration: { ...administration,
+        workloads: new WorkloadAdministration(database,controlPlaneRepository,createPasswordOperations(runtimeConfig),clock,runtimeConfig.IDENTITY_WORKLOAD_ADMINISTRATION_ENABLED),
         identityManagement,
         googleRecoveryHandoff,
         ...(googleVerification === undefined ? {} : { googleVerification }),

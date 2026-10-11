@@ -57,11 +57,12 @@ export class PostgresControlCentreRepository implements ControlCentreRepository 
   const row=r.rows[0]!;return {testIdentities:Number(row.testIdentities),testCandidates:Number(row.testCandidates),humans:Number(row.humans),products:Number(row.products),businesses:Number(row.businesses),knownParticipants:Number(row.knownParticipants),duplicateEmailGroups:Number(row.duplicateEmailGroups),pendingRecoveryRequests:Number(row.pendingRecoveryRequests),pendingVerificationCases:Number(row.pendingVerificationCases)};
  }
  async products() {
-  const r=await this.db.query<{id:string;displayName:string;status:string;participants:number;entitledHumans:number;businesses:number;workloads:number}>(`SELECT p.id,p.display_name AS "displayName",p.status,
+  const r=await this.db.query<{id:string;displayName:string;status:string;participants:number;entitledHumans:number;businesses:number;workloads:number;reportingWorkloads:number}>(`SELECT p.id,p.display_name AS "displayName",p.status,
    (SELECT count(*)::int FROM human_product_participations WHERE product_id=p.id AND status='active') AS participants,
    (SELECT count(DISTINCT human_identity_id)::int FROM product_entitlements WHERE product_id=p.id AND status='active') AS "entitledHumans",
    (SELECT count(*)::int FROM product_participations WHERE product_id=p.id AND status='active') AS businesses,
-   (SELECT count(*)::int FROM product_workloads WHERE product_id=p.id AND status='active') AS workloads
+   ((SELECT count(*)::int FROM product_workloads WHERE product_id=p.id AND status='active') + (SELECT count(*)::int FROM managed_product_workloads WHERE product_id=p.id AND status='active')) AS workloads,
+   ((SELECT count(*)::int FROM product_workloads WHERE product_id=p.id AND status='active') + (SELECT count(*)::int FROM managed_product_workloads WHERE product_id=p.id AND status='active' AND 'human.participation.register'=ANY(capabilities))) AS "reportingWorkloads"
    FROM registered_products p ORDER BY p.display_name,p.id`);return r.rows;
  }
  async activity(input:{eventType?:string|undefined},after:{key:string;id:string}|null) {
@@ -75,10 +76,11 @@ export class PostgresControlCentreRepository implements ControlCentreRepository 
  async registerParticipation(id:string,product:string,workload:string,now:Date) {
   // Recheck and lock the canonical principals within the registration transaction.
   // A workload cannot report another registered product or a non-active Human.
-  const authority=await this.db.query<{humanStatus:string;productStatus:string;workloadStatus:string;workloadProduct:string}>(`SELECT h.status AS "humanStatus",p.status AS "productStatus",w.status AS "workloadStatus",w.product_id AS "workloadProduct" FROM human_identities h CROSS JOIN registered_products p CROSS JOIN product_workloads w WHERE h.id=$1 AND p.id=$2 AND w.id=$3 FOR SHARE OF h,p,w`,[id,product,workload]);
-  const principal=authority.rows[0];
+  const legacy=await this.db.query<{humanStatus:string;productStatus:string;workloadStatus:string;workloadProduct:string}>(`SELECT h.status AS "humanStatus",p.status AS "productStatus",w.status AS "workloadStatus",w.product_id AS "workloadProduct" FROM human_identities h CROSS JOIN registered_products p CROSS JOIN product_workloads w WHERE h.id=$1 AND p.id=$2 AND w.id=$3 FOR SHARE OF h,p,w`,[id,product,workload]);
+  const managed=legacy.rows.length ? null : await this.db.query<{humanStatus:string;productStatus:string;workloadStatus:string;workloadProduct:string}>(`SELECT h.status AS "humanStatus",p.status AS "productStatus",w.status AS "workloadStatus",w.product_id AS "workloadProduct" FROM human_identities h CROSS JOIN registered_products p CROSS JOIN managed_product_workloads w WHERE h.id=$1 AND p.id=$2 AND w.id=$3 AND 'human.participation.register'=ANY(w.capabilities) FOR SHARE OF h,p,w`,[id,product,workload]);
+  const principal=legacy.rows[0]??managed?.rows[0];
   if(!principal||principal.humanStatus!=="active"||principal.productStatus!=="active"||principal.workloadStatus!=="active"||principal.workloadProduct!==product)throw new AppError('Canonical product participation authority is unavailable','PARTICIPATION_AUTHORITY_INVALID',403);
-  const r=await this.db.query("INSERT INTO human_product_participations(human_identity_id,product_id,workload_id,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$4) ON CONFLICT(human_identity_id,product_id) DO NOTHING",[id,product,workload,now]);
+  const r=await this.db.query("INSERT INTO human_product_participations(human_identity_id,product_id,workload_id,managed_workload_id,status,created_at,updated_at) VALUES($1,$2,$3,$4,'active',$5,$5) ON CONFLICT(human_identity_id,product_id) DO NOTHING",[id,product,legacy.rows.length?workload:null,legacy.rows.length?null:workload,now]);
   if(r.rowCount===0){const existing=await this.db.query<{status:string}>("SELECT status FROM human_product_participations WHERE human_identity_id=$1 AND product_id=$2",[id,product]);if(existing.rows[0]?.status!=='active')throw new AppError('This participation is inactive and requires separate review','PARTICIPATION_INACTIVE',409);}
   return r.rowCount===1;
  }

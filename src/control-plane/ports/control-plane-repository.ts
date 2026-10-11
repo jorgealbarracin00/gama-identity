@@ -4,6 +4,7 @@ import type {
   ProductEntitlement,
   ProductParticipation,
   ProductWorkload,
+  ManagedProductWorkload,
   RegisteredProduct,
   Tenant,
   TenantMembership,
@@ -26,6 +27,7 @@ export interface ControlPlaneRepository {
   findPlatformAdministrationMembership(humanIdentityId: string): Promise<PlatformAdministrationMembership | null>;
   saveWorkload(workload: ProductWorkload): Promise<void>;
   findWorkload(id: string): Promise<ProductWorkload | null>;
+  findManagedWorkload?(id: string): Promise<ManagedProductWorkload | null>;
   saveMembership(membership: TenantMembership): Promise<void>;
   findMembership(tenantId: string, humanIdentityId: string): Promise<TenantMembership | null>;
   listMembershipsForTenant(tenantId: string): Promise<readonly TenantMembership[]>;

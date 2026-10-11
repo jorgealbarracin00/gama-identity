@@ -99,6 +99,8 @@ const environmentSchema = z.object({
     .int()
     .min(300)
     .default(2_592_000),
+  // Independently approved server administration only; never enables identity mutations.
+  IDENTITY_WORKLOAD_ADMINISTRATION_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   REPOSITORY_MODE: z.enum(["memory", "postgres"]).default("memory"),
   DATABASE_URL: z.string().url().optional(),
   DATABASE_SSL: z.enum(["disable", "require"]).default("disable"),

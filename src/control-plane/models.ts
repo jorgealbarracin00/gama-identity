@@ -141,3 +141,16 @@ export interface PlatformAuditEvent {
 export const COCO_PRODUCT_ID = "coco-the-llama";
 export const COCO_WORKLOAD_ID = "coco-backend";
 export const COCO_DEVELOPMENT_TENANT_ID = "coco-development";
+
+/** Explicit server-to-server reporting scopes; legacy workloads retain existing policy. */
+export const MANAGED_WORKLOAD_CAPABILITIES = [
+  "workload.context.read", "human.participation.register", "human.participation.backfill.preview",
+] as const;
+export type ManagedWorkloadCapability = (typeof MANAGED_WORKLOAD_CAPABILITIES)[number];
+export type WorkloadCapability = ManagedWorkloadCapability | "team.manage" | "identity.dependencies.report";
+export interface ManagedProductWorkload extends ProductWorkload {
+  readonly revision: number;
+  readonly capabilities: readonly ManagedWorkloadCapability[];
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+}

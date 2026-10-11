@@ -29,7 +29,7 @@ export interface ControlCentreRepository {
   humans(input:HumanDirectoryQuery, after:{key:string;id:string}|null):Promise<HumanDirectoryRow[]>;
   human(id:string):Promise<ConsoleHuman|null>;
   summary():Promise<{humans:number;products:number;businesses:number;knownParticipants:number;duplicateEmailGroups:number;pendingRecoveryRequests:number;pendingVerificationCases:number;testIdentities?:number;testCandidates?:number}>;
-  products():Promise<{id:string;displayName:string;status:string;participants:number;entitledHumans:number;businesses:number;workloads:number}[]>;
+  products():Promise<{id:string;displayName:string;status:string;participants:number;entitledHumans:number;businesses:number;workloads:number;reportingWorkloads?:number}[]>;
   activity(input:{eventType?:string|undefined;cursor?:string|undefined},after:{key:string;id:string}|null):Promise<{id:string;eventType:string;actorReference:string;subjectReference:string;productId:string|null;tenantId:string|null;occurredAt:string}[]>;
   profile(id:string):Promise<{humanIdentityId:string;preferredDisplayName:string|null;revision:number}>;
   updateProfile(id:string,name:string|null,expectedRevision:number,now:Date):Promise<boolean>;
@@ -96,7 +96,7 @@ export class ConsoleControlCentre {
     const actor=await this.admin(id),products=await this.repository.products();
     await this.audit(actor,"platform.products.inspected","product-directory");
     const aliases:Record<string,readonly string[]>={"coco-the-llama":["coco-web"],cashcast:["cashcast-preview"]};
-    return {products:products.map(p=>({...p,authenticationConfigurationPresent:this.configuredApps.some(a=>a===p.id||aliases[p.id]?.includes(a)),participationCoverage:p.workloads>0?"reporting_contract_available":"no_authenticated_reporting_workload",...integrationFacts(this.integrations.find(i=>i.productId===p.id))}))};
+    return {products:products.map(p=>({...p,authenticationConfigurationPresent:this.configuredApps.some(a=>a===p.id||aliases[p.id]?.includes(a)),participationCoverage:(p.reportingWorkloads??p.workloads)>0?"reporting_contract_available":"no_authenticated_reporting_workload",...integrationFacts(this.integrations.find(i=>i.productId===p.id))}))};
   }
   async productHumans(id:SessionId,input:{productId:string;relationship?:AssociationKind|undefined;query?:string|undefined;cursor?:string|undefined}) {
     const actor=await this.admin(id);
@@ -150,7 +150,7 @@ export class ConsoleControlCentre {
     });
   }
   async participate(id:SessionId,workloadId:string,secret:string) {
-    return this.atomically(async()=>{const s=await this.session(id);const workload=await this.plane.authenticateWorkload(workloadId,secret);
+    return this.atomically(async()=>{const s=await this.session(id);const workload=await this.plane.authenticateWorkload(workloadId,secret,"human.participation.register");
       if(!workload)throw new AppError("Product reporting authorization is required","WORKLOAD_INVALID",401);
       this.assertParticipationApplicable(workload.productId);
       const human=s.humanIdentityId.value;
@@ -168,7 +168,7 @@ export class ConsoleControlCentre {
     const integration=this.integrations.find(i=>i.webAppIds.includes(appId));
     if(!integration)return null;
     return this.atomically(async()=>{
-      const s=await this.session(id),workload=await this.control.findWorkload(integration.reportingWorkloadId!);
+      const s=await this.session(id),workload=await this.plane.resolveWorkloadForCapability(integration.reportingWorkloadId!,"human.participation.register");
       if(!workload||workload.status!=="active"||workload.productId!==integration.productId)throw new AppError("Product participation reporting is unavailable","PARTICIPATION_REPORTING_UNAVAILABLE",503);
       const product=await this.control.findProduct(workload.productId);
       if(product?.status!=="active")throw new AppError("Product participation reporting is unavailable","PARTICIPATION_REPORTING_UNAVAILABLE",503);
@@ -179,7 +179,7 @@ export class ConsoleControlCentre {
   }
   /** Preview only: the product workload must attest canonical references; email correspondence is never used. */
   async previewParticipationBackfill(id:SessionId,workloadId:string,secret:string,entries:readonly {humanIdentityId:string;evidenceReference:string}[]) {
-    const actor=await this.admin(id),workload=await this.plane.authenticateWorkload(workloadId,secret);
+    const actor=await this.admin(id),workload=await this.plane.authenticateWorkload(workloadId,secret,"human.participation.backfill.preview");
     if(!workload)throw new AppError("Product reporting authorization is required","WORKLOAD_INVALID",401);
     this.assertParticipationApplicable(workload.productId);
     if(entries.length>100||entries.some(e=>!e.humanIdentityId||e.humanIdentityId.length>200||!e.evidenceReference||e.evidenceReference.length>240||/[\p{Cc}\p{Cf}]/u.test(e.evidenceReference)))throw new AppError("Canonical backfill references are invalid","INVALID_REQUEST",400);

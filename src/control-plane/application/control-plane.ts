@@ -11,6 +11,8 @@ import {
   COCO_WORKLOAD_ID,
   capabilitiesForTenantWorkforceRole,
   type LifecycleStatus,
+  type ProductWorkload,
+  type WorkloadCapability,
   type TenantWorkforceCapability,
   type TenantWorkforceRole,
 } from "../models.js";
@@ -184,12 +186,28 @@ export class ControlPlane {
       capabilities: workforceContextSatisfied && tenantRole !== null ? capabilitiesForTenantWorkforceRole(tenantRole) : [] };
   }
 
-  async authenticateWorkload(workloadId: string, secret: string): Promise<AuthenticatedWorkload | null> {
-    const workload = await this.repository.findWorkload(workloadId);
-    if (workload === null || !active(workload.status)) return null;
+  /** Managed authentication always requires an explicit scope. Legacy policy is unchanged. */
+  async resolveWorkloadForCapability(workloadId: string, capability: WorkloadCapability): Promise<ProductWorkload | null> {
+    const legacy = await this.repository.findWorkload(workloadId);
+    const managed = await this.repository.findManagedWorkload?.(workloadId) ?? null;
+    if (legacy && managed) return null;
+    const workload = legacy ?? managed;
+    if (!workload || !active(workload.status)) return null;
+    if (managed && !managed.capabilities.some(scope => scope === capability)) return null;
     const product = await this.repository.findProduct(workload.productId);
-    if (product === null || !active(product.status)) return null;
-    const verified = await this.passwords.verify(secret, PasswordHash.from(workload.secretHash));
-    return verified ? { workloadId: workload.id, productId: workload.productId } : null;
+    return product && active(product.status) ? workload : null;
+  }
+
+  async authenticateWorkload(workloadId: string, secret: string, capability?: WorkloadCapability): Promise<AuthenticatedWorkload | null> {
+    return this.atomically(async () => {
+      const workload = capability === undefined
+        ? await this.repository.findWorkload(workloadId)
+        : await this.resolveWorkloadForCapability(workloadId, capability);
+      if (!workload || !active(workload.status)) return null;
+      const product = await this.repository.findProduct(workload.productId);
+      if (!product || !active(product.status)) return null;
+      const verified = await this.passwords.verify(secret, PasswordHash.from(workload.secretHash));
+      return verified ? { workloadId: workload.id, productId: workload.productId } : null;
+    });
   }
 }

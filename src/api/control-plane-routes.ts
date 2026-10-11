@@ -26,7 +26,7 @@ export function controlPlaneRoutes(services: IdentityServices, controlPlane: Con
       if (typeof workloadId !== "string" || typeof secret !== "string") {
         throw new AppError("A workload identity is required", "WORKLOAD_INVALID", 401);
       }
-      const workload = await controlPlane.authenticateWorkload(workloadId, secret);
+      const workload = await controlPlane.authenticateWorkload(workloadId, secret, "workload.context.read");
       if (workload === null) throw new AppError("Workload identity is not authenticated", "WORKLOAD_INVALID", 401);
       return reply.send(workload);
     });

@@ -207,7 +207,7 @@ async function tenantAdministrationContext(
   if (typeof workloadId !== "string" || typeof workloadSecret !== "string" || typeof tenantId !== "string" || tenantId.length === 0) {
     throw new AppError("Authenticated Product workload context is required", "WORKLOAD_CONTEXT_REQUIRED", 401);
   }
-  const workload = await services.controlPlane.authenticateWorkload(workloadId, workloadSecret);
+  const workload = await services.controlPlane.authenticateWorkload(workloadId, workloadSecret, "team.manage");
   if (workload === null) throw new AppError("Product workload is not authenticated", "WORKLOAD_INVALID", 401);
   return { actorHumanIdentityId, tenantId, productId: workload.productId };
 }

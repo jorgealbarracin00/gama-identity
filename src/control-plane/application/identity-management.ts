@@ -583,6 +583,7 @@ export class IdentityManagement {
       const w = await this.controlPlane.authenticateWorkload(
         workloadId,
         secret,
+        "identity.dependencies.report",
       );
       if (!w)
         throw new AppError(

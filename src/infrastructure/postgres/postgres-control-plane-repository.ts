@@ -6,6 +6,8 @@ import type {
   ProductEntitlement,
   ProductParticipation,
   ProductWorkload,
+  ManagedProductWorkload,
+  ManagedWorkloadCapability,
   RegisteredProduct,
   Tenant,
   TenantMembership,
@@ -129,6 +131,14 @@ export class PostgresControlPlaneRepository implements ControlPlaneRepository {
   async findWorkload(id: string): Promise<ProductWorkload | null> {
     const result = await this.database.query<WorkloadRow>("SELECT id, product_id, secret_hash, status FROM product_workloads WHERE id = $1", [id]);
     const row = result.rows[0]; return row === undefined ? null : { id: row.id, productId: row.product_id, secretHash: row.secret_hash, status: row.status };
+  }
+  async findManagedWorkload(id: string): Promise<ManagedProductWorkload | null> {
+    // Held until the surrounding reporting transaction commits. Rotation and
+    // revocation cannot invalidate a credential between verification and insert.
+    const result = await this.database.query<{id:string;product_id:string;secret_hash:string;status:ManagedProductWorkload['status'];revision:number;capabilities:ManagedWorkloadCapability[];created_at:Date;updated_at:Date}>(
+      "SELECT * FROM managed_product_workloads WHERE id=$1 FOR SHARE", [id]);
+    const row=result.rows[0];
+    return row ? {id:row.id,productId:row.product_id,secretHash:row.secret_hash,status:row.status,revision:row.revision,capabilities:row.capabilities,createdAt:row.created_at,updatedAt:row.updated_at}:null;
   }
   async saveMembership(value: TenantMembership): Promise<void> {
     await this.database.query(`INSERT INTO tenant_memberships (tenant_id, human_identity_id, status, tenant_role, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)
