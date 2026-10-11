@@ -1,6 +1,8 @@
+import { GoogleRecoveryHandoff } from "../control-plane/application/google-recovery-handoff.js";
 import { IdentityManagement, syntheticManagementEnabled } from '../control-plane/application/identity-management.js';
 import { GoogleRecoveryVerification } from "../control-plane/application/google-recovery-verification.js";
 import { ConsoleControlCentre } from "../control-plane/application/console-control-centre.js";
+import { recoveryOverviewSignals } from "../control-plane/application/recovery-overview.js";
 import { PostgresControlCentreRepository } from "../infrastructure/postgres/postgres-control-centre-repository.js";
 import { PostgresGoogleVerificationStore } from "../infrastructure/postgres/postgres-google-verification-store.js";
 import { IdentityExplorer, type IdentityInspectionRepository } from "../control-plane/application/identity-explorer.js";
@@ -106,6 +108,7 @@ import { SerialExecutor } from "../shared/serial-executor.js";
 export interface AdministrationServices {
   readonly controlCentre?: ConsoleControlCentre;
   readonly identityManagement?: IdentityManagement;
+  readonly googleRecoveryHandoff?: GoogleRecoveryHandoff;
   readonly platform: PlatformAdministration;
   readonly identityExplorer: IdentityExplorer;
   readonly googleVerification?: GoogleRecoveryVerification;
@@ -253,6 +256,9 @@ export async function buildRuntime(
     (work) => database.withTransaction(work),
   );
 
+  const managementGoogleAudiences = [...new Set([...runtimeConfig.GOOGLE_CLIENT_IDS, ...(runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB ? [runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB.clientId] : [])])];
+  const identityManagement = new IdentityManagement(database,new PostgresControlCentreRepository(database),new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,identities,sessions,federatedIdentities,federatedNonces,
+          new FederatedIdentityTokenVerifiers([managementGoogleAudiences.length===0 ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER) : new GoogleIdentityTokenVerifier({clientIds:managementGoogleAudiences})]),clock,syntheticManagementEnabled(runtimeConfig),controlPlane,syntheticManagementEnabled(runtimeConfig)?[]:["cashcast","grocery-master",...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId==="coco-web"?"coco-the-llama":app.appId==="cashcast-preview"?"cashcast":app.appId)]);
   return {
     services: {
       ...services,
@@ -269,13 +275,15 @@ export async function buildRuntime(
       register: new TransactionalRegister(services.register, database),
       controlPlane,
       administration: { ...administration,
-        identityManagement: new IdentityManagement(database,new PostgresControlCentreRepository(database),new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,identities,sessions,federatedIdentities,federatedNonces,
-          new FederatedIdentityTokenVerifiers([runtimeConfig.GOOGLE_CLIENT_IDS.length===0 ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER) : new GoogleIdentityTokenVerifier({clientIds:runtimeConfig.GOOGLE_CLIENT_IDS})]),clock,syntheticManagementEnabled(runtimeConfig),controlPlane,syntheticManagementEnabled(runtimeConfig)?[]:["cashcast","grocery-master",...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId==="coco-web"?"coco-the-llama":app.appId==="cashcast-preview"?"cashcast":app.appId)]),
+        identityManagement,
+        googleRecoveryHandoff: new GoogleRecoveryHandoff(database,identityManagement,sessions,identities,new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,clock,runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB),
         ...(googleVerification === undefined ? {} : { googleVerification }),
         controlCentre: new ConsoleControlCentre(new PostgresControlCentreRepository(database),
           new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,
           identities,sessions,controlPlane,clock,work=>database.withTransaction(work),
-          [...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId),...runtimeConfig.IDENTITY_TRUSTED_APPS.map(app=>app.id)],googleVerification) },
+          [...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId),...runtimeConfig.IDENTITY_TRUSTED_APPS.map(app=>app.id)],googleVerification,
+          runtimeConfig.IDENTITY_PRODUCT_INTEGRATIONS,syntheticManagementEnabled(runtimeConfig),
+          (session,actor)=>recoveryOverviewSignals(database,identityManagement,session,actor,clock)) },
     },
     databaseHealth: {
       async check() {

@@ -1,3 +1,4 @@
+import { googleRecoveryHandoffRoutes } from "./google-recovery-handoff-routes.js";
 import { identityManagementRoutes } from './identity-management-routes.js';
 import Fastify, { type FastifyInstance } from "fastify";
 
@@ -34,6 +35,7 @@ export function buildApp(
   app.register(administrationRoutes(services));
   app.register(consoleControlCentreRoutes(services));
   app.register(identityManagementRoutes(services));
+  app.register(googleRecoveryHandoffRoutes(services));
 
   return app;
 }

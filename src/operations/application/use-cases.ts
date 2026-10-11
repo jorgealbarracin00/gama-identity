@@ -64,7 +64,7 @@ export class Register {
       }
 
       const session = await this.createSession.execute(
-        authentication.humanIdentityId,
+        authentication.humanIdentityId, undefined, "email_password",
       );
       sessionId = SessionId.from(session.sessionId);
       return { humanIdentityId: identity.id.value, session };
@@ -97,7 +97,7 @@ export class Login {
     if (result.outcome !== "success") {
       throw new InvalidLoginError();
     }
-    return this.createSession.execute(result.humanIdentityId);
+    return this.createSession.execute(result.humanIdentityId, undefined, "email_password");
     });
   }
 }

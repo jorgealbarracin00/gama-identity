@@ -1,7 +1,7 @@
 import type { HumanIdentityRepository } from '../../identity/ports/human-identity-repository.js';
 import type { HumanIdentityId } from "../../identity/domain/human-identity-id.js";
 import type { Clock } from "../../shared/clock.js";
-import { Session } from "../domain/session.js";
+import { Session, type SessionAuthenticationMethod } from "../domain/session.js";
 import type { SessionId, SessionIdGenerator } from "../domain/session-id.js";
 import {
   SecureSessionRenewalTokenGenerator,
@@ -51,7 +51,7 @@ export class CreateSession {
     private readonly humans?: HumanIdentityRepository,
   ) {}
 
-  async execute(humanIdentityId: HumanIdentityId, authenticatedAt?: Date): Promise<CreatedSession> {
+  async execute(humanIdentityId: HumanIdentityId, authenticatedAt?: Date, authenticationMethod: SessionAuthenticationMethod | null = null): Promise<CreatedSession> {
     if (this.humans && (await this.humans.findById(humanIdentityId))?.status !== "active") throw new SessionRenewalError("revoked");
     const renewalToken = this.renewalTokens.next();
     const session = Session.create(
@@ -62,6 +62,7 @@ export class CreateSession {
       this.renewalDurationSeconds,
       this.clock,
       authenticatedAt,
+      authenticationMethod,
     );
     await this.repository.save(session);
     return {
@@ -111,7 +112,7 @@ export class RenewSession {
       }
       previous.revoke();
       await this.repository.save(previous);
-      return this.createSession.execute(previous.humanIdentityId, previous.authenticatedAt);
+      return this.createSession.execute(previous.humanIdentityId, previous.authenticatedAt, previous.authenticationMethod);
     });
   }
 }

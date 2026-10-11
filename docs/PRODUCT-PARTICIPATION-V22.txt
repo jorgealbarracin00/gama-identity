@@ -1,0 +1,114 @@
+GAMA Console V2.2 product participation contract
+
+Existing model and authority
+- Reuses migration 013 human_product_participations and its unique Human/product key.
+- Reuses POST /control/human-participation with an authenticated Human bearer plus
+  authenticated product-workload headers. The request body is empty and strict.
+- Canonical Human ID comes only from the current active session; product ID comes
+  only from the active registered workload. No email correspondence is used.
+- Active Human, product and workload are rechecked and row-locked before insert.
+- Memberships, business participation, subscriptions and entitlements do not
+  automatically register a Human and are not prerequisites for ordinary reporting.
+  A product backend must authorize its own authenticated access before reporting.
+- One new row and one audit event per new relationship. Retry leaves original
+  creation/update timestamps unchanged. Inactive retained participation requires
+  separately reviewed action and is not silently reactivated.
+- Participation and its audit event commit together. Audit outage rolls back the row.
+
+Reusable product integration
+- Workload secrets stay on product servers. Native SDK integration calls a trusted
+  product-backend closure; it does not ship central workload secrets to an iPhone.
+- A reporting failure must preserve an already authenticated session. Report a
+  pending/retry condition and retry only after supported authenticated access.
+- SDK success caching/coalescing is scoped to canonical Human and registered product.
+- Trusted central web authentication can auto-report only after successful provider
+  authentication and only for an explicitly configured app-to-product mapping.
+- Default IDENTITY_PRODUCT_INTEGRATIONS is []. It enables no new auto-reporting.
+  Production configuration changes require separately reviewed authorization.
+- A web mapping uses an active registered product/workload; it does not use a public
+  app identifier as proof or accept arbitrary client-chosen Human/product IDs.
+
+Evidence-backed registry facts
+- IDENTITY_PRODUCT_INTEGRATIONS entries contain productId, integrationStatus,
+  participationRecording, evidenceReference, verifiedAt and warnings.
+- integrationStatus: gama_identity/cloudkit_only/login_free/other_identity/unknown.
+- participationRecording: verified/missing/not_applicable/unknown.
+- Optional webAppIds and reportingWorkloadId explicitly opt into trusted web reporting.
+- Evidence is operator-reviewed source/configuration metadata. A workload or OAuth
+  configuration alone does not establish live integration or customer coverage.
+- Absent evidence is displayed as unknown, never as zero customer usage or verified.
+- Declared CloudKit-only/login-free/other-identity products reject Human reporting.
+- No production facts or configuration were inserted by development.
+
+Bounded administration
+- POST /administration/platform/products/humans/query
+  { productId, relationship?: participation|entitlement|all, query?, cursor? }
+  returns { humans, nextCursor }. Default relation is actual known participation.
+- POST /administration/platform/humans/products/query
+  { humanIdentityId, relationship?: participation|entitlement|all, cursor? }
+  returns { products, nextCursor }. Default relation is actual known participation.
+- Pages contain at most 50 records; SQL filtering/keyset pagination binds cursors to
+  the complete relation/query/subject scope. Product-entitlement Humans remain a
+  separate optional view. Existing directory contract still includes all associations.
+- Existing products/inspect retains participants, entitledHumans and businesses
+  as separate counts and adds explicit integration evidence fields.
+- Both read directions require current server-side Platform Administrator authority,
+  no-store responses and successful audit persistence before exposing data.
+- Projections never select provider subjects, passwords, tokens or session credentials.
+
+Existing-customer backfill boundary
+- POST /administration/platform/products/participation/backfill/preview requires
+  current administrator authority and the product's authenticated reporting workload.
+- Entries are canonical Human IDs plus minimal evidence references from an
+  authoritative product exporter. Unknown correspondence must not be submitted.
+- Preview validates current Human/status/existing participation and records only
+  an audit event. It never creates Humans or infers use from entitlements/membership/email.
+- No production execution route exists. simulateParticipationBackfill is callable
+  only through the strict localhost, NODE_ENV=test, *_management_test runtime gate.
+- Isolated simulation supports idempotent canonical exporter fixtures. This is not
+  proof that any live product has completed a canonical exporter/dependency inspection.
+- Production backfill, product-app release and auto-reporting configuration each need
+  separate approval and a current verified production checkpoint where applicable.
+
+Smart Overview
+- Participation warnings require explicit reviewed GAMAIdentity integration evidence
+  and missing reporting; absent evidence remains unknown. The action opens Products.
+- Recovery summaries are bounded to ten pending/verified actor-owned recovery and
+  compensation cases. They reuse current authenticated Preview safeguards.
+- Ready requires fresh exact ownership evidence, active unexpired control sessions,
+  the reviewed Google relationship, complete dependency coverage and the execution gate.
+  Production always reports execution disabled; missing evidence has explicit reasons.
+- Both Preview contracts expose optional proofExpiresAt, distinct from case expiry.
+- Summary projections expose no bearer, provider subject, token or OAuth URL.
+- Starting fresh verification supersedes only the same administrator's exact Google
+  recovery pair, or the same administrator's exact compensation receipt. Cancelled
+  case/proof/history rows remain; associated handoffs are cancelled with PKCE cleared.
+  Supersession, new preparation and audit commit together. Concurrent retries leave
+  one current own request; unrelated actors/pairs and completed compensation remain intact.
+
+Validation
+- New participation suite 17/17 passed.
+- Complete final backend regression 429/429, 52 suites, 0 skips on Node 22.23.3 with
+  six separate local PostgreSQL 16 fixture databases; typecheck/build passed.
+- Includes revoked/expired ordinary source and primary proof checks, individual
+  proof expiry, exact Google relationship binding, and audited unused OAuth callback
+  expiry cleanup without reusing authorization codes or interrupting reconciliation.
+- Retry regressions cover fresh proof/Preview, rejected cancelled proof/callback/execution,
+  exact scope, concurrent preparation and atomic audit rollback for both request kinds.
+- Operational fixture seeding rejects remote/override URLs before TRUNCATE. Its pure
+  guard validates PostgreSQL protocol, exact loopback host, no query/fragment and
+  mode-specific *_ui or *_management_test database names without importing the fixture.
+- Synthetic management UI evidence refreshes only before assessment or lifecycle
+  Preview, keeping timestamps stable through explicit confirmation. The fixture has
+  no periodic refresh; production freshness limits and review-digest checks are unchanged.
+- Existing-only Apple owner authentication has ten signed-credential PostgreSQL
+  security regressions. See APPLE-OWNER-AUTHENTICATION-V22.txt for exact scopes,
+  atomic audit/session behavior, production denial and unchanged legacy sign-in.
+- Standalone demonstration scripts/demo-product-participation.ts performs actual
+  synthetic Email login, authenticated workload registration, repeated registration
+  and both Console HTTP projections. One canonical Human has Grocery Master,
+  Coco the Llama and CashCast fixture relationships, without entitlements/memberships.
+- Evidence file /tmp/gama-v22-demo-a-results.json contains sanitized synthetic IDs,
+  relationship/count/audit results and labels provider coverage precisely.
+- No product participation schema migration, production backfill, production
+  identity mutation, provider transfer or deployment was performed.

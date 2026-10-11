@@ -4,6 +4,7 @@ import type { IdentityServices } from "./services.js";
 import { SessionId } from "../sessions/domain/session-id.js";
 import { AppError } from "../shared/errors.js";
 import { AdministrationAuthorizationError } from "../control-plane/application/administration-principals.js";
+import { FederatedAuthenticationError } from "../authentication/federated/application/errors.js";
 const human = z.string().min(1).max(200),
   uuid = z.uuid();
 const action = z.enum(["suspend", "reactivate", "retire"]);
@@ -167,6 +168,19 @@ export function identityManagementRoutes(
             r.body,
           ),
         ),
+      "recovery/native-prove": (m,s,r) => m.proveNativeRecovery(s,parse(z.object({caseId:uuid,targetSession:z.string().min(1).max(200),identityToken:z.string().min(1).max(16384)}).strict(),r.body)),
+      "recovery/owner/apple": async (m,s,r) => {
+        const input = parse(z.object({identityToken:z.string().min(1).max(16384),nonce:z.string().regex(/^[A-Za-z0-9_-]{32,256}$/u),caseId:uuid.optional(),kind:z.enum(["recovery","compensation"]).optional()}).strict(),r.body);
+        const result = await m.authenticateExistingOwnerApple(s, {
+          ...(input.caseId === undefined ? {} : {caseId:input.caseId}),
+          ...(input.kind === undefined ? {} : {kind:input.kind}),
+        }, expected => services.authenticateFederated.executeExisting({provider:"apple",identityToken:input.identityToken,nonce:input.nonce},expected));
+        return {session:result.session,account:{email:result.providerEmail}};
+      },
+      "recovery/compensation/prepare": (m,s,r) => m.prepareCompensation(s,parse(z.object({originalRequestId:uuid}).strict(),r.body).originalRequestId),
+      "recovery/compensation/prove": (m,s,r) => m.proveCompensation(s,parse(z.object({caseId:uuid,targetSession:z.string().min(1).max(200),identityToken:z.string().min(1).max(16384)}).strict(),r.body)),
+      "recovery/compensation/preview": (m,s,r) => m.previewCompensation(s,parse(z.object({caseId:uuid}).strict(),r.body).caseId),
+      "recovery/compensation/execute": (m,s,r) => m.executeCompensation(s,parse(z.object({caseId:uuid,requestId:uuid,reviewDigest:z.string().regex(/^[a-f0-9]{64}$/),confirmation:z.string().max(700),revokeTargetSessions:z.boolean(),acceptFreshSignIn:z.boolean()}).strict(),r.body)),
       "dependencies/inspector": (m, s, r) => {
         const p = parse(
           z.object({ productId: human, workloadId: human }).strict(),
@@ -178,6 +192,7 @@ export function identityManagementRoutes(
     for (const [path, work] of Object.entries(routes))
       app.post(
         `/administration/platform/identity-management/${path}`,
+        path === "recovery/owner/apple" ? {logLevel:"silent"} : {},
         async (req, rep) => {
           rep.header("Cache-Control", "no-store");
           const match = /^Bearer ([^\s]+)$/.exec(
@@ -195,6 +210,8 @@ export function identityManagementRoutes(
                 e.code,
                 403,
               );
+            if (e instanceof FederatedAuthenticationError)
+              throw new AppError("Apple owner authentication could not be completed", "OWNER_AUTHENTICATION_INVALID", e.code === "VERIFICATION_UNAVAILABLE" ? 503 : 403);
             throw new AppError(
               "The operation failed without committing changes",
               "IDENTITY_MANAGEMENT_FAILED",

@@ -1,0 +1,44 @@
+GAMA Console V2.2 existing Apple owner authentication
+
+Endpoint
+POST /administration/platform/identity-management/recovery/owner/apple
+Authorization: existing active Platform Administrator bearer
+Strict body: { identityToken, nonce, caseId?, kind?: recovery|compensation }
+Response: ordinary authentication DTO { session, account: { email } }.
+No caller-selected Human ID, provider, creation flag or verification assertion.
+
+Scope and mutation boundary
+- Without a case, expected Human is the server-authenticated administrator. An older
+  otherwise valid administrator session can request fresh Apple step-up.
+- With a case, expected Human is the exact primary in the actor-owned awaiting,
+  unexpired Google recovery case or its receipt-bound compensation request.
+- Apple uses the existing configured issuer, signature, audience and nonce verifier.
+  executeExisting always disables Human creation and rejects missing/mismatched
+  ownership, inactive Apple relationships or inactive Humans before metadata/session writes.
+- Successful authentication creates only the ordinary fresh session for that exact
+  existing Human and updates the supported provider metadata, preserving relationship
+  ownership and creation history. Apple and Email access remain unchanged.
+- Authorization, exact case binding, nonce consumption, verified metadata, fresh session
+  and success audit share one exclusive synthetic PostgreSQL transaction. Audit failure
+  rolls everything back. No provider transfer, lifecycle change or application-data copy.
+- Legacy AuthenticateFederated.execute and public ordinary sign-in behavior are unchanged.
+
+Production and privacy
+- The existing synthetic-management gate applies before credential verification:
+  production returns 403; there is no new enabled production owner-authentication flow.
+- Route logging is silent; responses are no-store; rejected credentials use generic
+  authentication errors. Audits contain only actor/owner/case scope, never provider
+  subjects, identity tokens, nonces, passwords, session or renewal credentials.
+- Fresh authentication credentials use the established client authentication response;
+  they are not added to administrative identity-inspection projections.
+
+Validation
+- Ten signed-Apple PostgreSQL regressions cover known administrator step-up, exact
+  primary and compensation receipt scope, unknown/mismatched/inactive rejection with
+  no creation or metadata/session/nonce writes, replay, concurrent nonce reuse, strict
+  body and current permissions, production denial and atomic audit rollback.
+- Targeted management suite: 61/61 including 58 PostgreSQL orchestration tests.
+- Independent source security review found no actionable blocker. Tests use local
+  signed synthetic credentials with real issuer/audience/nonce verification.
+- No live Apple account/device authentication or production activation is claimed.
+- No migration changes. Deployed baseline rollback remains compatible.

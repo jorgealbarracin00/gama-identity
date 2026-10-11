@@ -4,6 +4,7 @@ import { SessionUnavailableError } from "./errors.js";
 import type { SessionIdGenerator } from "./session-id.js";
 import { SessionId } from "./session-id.js";
 
+export type SessionAuthenticationMethod = "email_password" | "apple" | "google";
 export type SessionStatus = "active" | "expired" | "revoked";
 
 export interface SessionSnapshot {
@@ -11,6 +12,7 @@ export interface SessionSnapshot {
   readonly humanIdentityId: HumanIdentityId;
   readonly createdAt: Date;
   readonly authenticatedAt?: Date;
+  readonly authenticationMethod?: SessionAuthenticationMethod | null;
   readonly lastAccessedAt: Date;
   readonly expiresAt: Date;
   readonly status: SessionStatus;
@@ -29,6 +31,7 @@ export class Session {
     private readonly renewalHash: string | null,
     private readonly renewalExpirationTime: Date | null,
     private readonly authenticationTime: Date,
+    readonly authenticationMethod: SessionAuthenticationMethod | null,
   ) {}
 
   static create(
@@ -39,6 +42,7 @@ export class Session {
     renewalDurationSeconds: number,
     clock: Clock,
     authenticatedAt?: Date,
+    authenticationMethod: SessionAuthenticationMethod | null = null,
   ): Session {
     if (!Number.isInteger(durationSeconds) || durationSeconds <= 0 ||
         !Number.isInteger(renewalDurationSeconds) || renewalDurationSeconds <= durationSeconds) {
@@ -55,6 +59,7 @@ export class Session {
       renewalTokenHash,
       new Date(now.getTime() + renewalDurationSeconds * 1000),
       new Date(authenticatedAt ?? now),
+      authenticationMethod,
     );
   }
 
@@ -69,6 +74,7 @@ export class Session {
       snapshot.renewalTokenHash,
       snapshot.renewalExpiresAt === null ? null : new Date(snapshot.renewalExpiresAt),
       new Date(snapshot.authenticatedAt ?? snapshot.createdAt),
+      snapshot.authenticationMethod ?? null,
     );
   }
 
@@ -131,6 +137,7 @@ export class Session {
       this.renewalHash,
       this.renewalExpiresAt,
       this.authenticatedAt,
+      this.authenticationMethod,
     );
   }
 
@@ -140,6 +147,7 @@ export class Session {
       humanIdentityId: this.ownerId,
       createdAt: this.createdAt,
       authenticatedAt: this.authenticatedAt,
+      authenticationMethod: this.authenticationMethod,
       lastAccessedAt: this.lastAccessedAt,
       expiresAt: this.expiresAt,
       status: this.lifecycleStatus,

@@ -1,6 +1,8 @@
 import "dotenv/config";
 
 import { z } from "zod";
+import { googleRecoveryHandoffConfigSchema } from "../control-plane/application/google-recovery-handoff.js";
+import { productIntegrationSchema } from "../control-plane/application/product-integration.js";
 
 const trustedIdentityAppsSchema = z.array(z.object({
   id: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
@@ -66,6 +68,17 @@ const defaultTrustedApps = JSON.stringify([{
 }]);
 
 const environmentSchema = z.object({
+  // Reviewed integration evidence only. Empty preserves all existing reporting behaviour.
+  IDENTITY_PRODUCT_INTEGRATIONS: z.string().default("[]").transform((value, context) => {
+    try {
+      const result = productIntegrationSchema.safeParse(JSON.parse(value));
+      if (!result.success) throw new Error();
+      return result.data;
+    } catch {
+      context.addIssue({ code: "custom", message: "IDENTITY_PRODUCT_INTEGRATIONS must contain unique, evidence-backed product integration facts" });
+      return z.NEVER;
+    }
+  }),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
   NODE_ENV: z
     .enum(["development", "test", "production"])
@@ -135,6 +148,11 @@ const environmentSchema = z.object({
   }),
   // Optional additive registry. Empty preserves all legacy/native behaviour.
   // Private operator binding. Absent by default; HTTP callers cannot select a pair.
+  IDENTITY_RECOVERY_GOOGLE_WEB: z.string().optional().transform((value, context) => {
+    if (value === undefined) return undefined;
+    try { const parsed = googleRecoveryHandoffConfigSchema.safeParse(JSON.parse(value)); if (!parsed.success) throw new Error(); return parsed.data; }
+    catch { context.addIssue({code:"custom",message:"Google recovery requires a dedicated HTTPS callback registration"}); return z.NEVER; }
+  }),
   IDENTITY_GOOGLE_VERIFICATION_SCOPE: z.string().optional().transform((value, context) => {
     if (value === undefined) return undefined;
     try {

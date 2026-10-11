@@ -65,9 +65,19 @@ export class AuthenticateFederated {
     }
   }
 
+  /** Owner reauthentication may use only the exact existing server-selected Human. */
+  async executeExisting(input: FederatedAuthenticationInput, expectedHumanIdentityId: string): Promise<FederatedAuthenticationResult> {
+    let provider: FederatedIdentityProvider;
+    try { provider = FederatedIdentityProvider.from(input.provider); }
+    catch { throw new FederatedAuthenticationError("PROVIDER_UNSUPPORTED"); }
+    const verified = await this.verifiers.verify(provider, input);
+    return this.atomically(() => this.complete(verified, false, expectedHumanIdentityId));
+  }
+
   private async complete(
     verified: VerifiedFederatedCredential,
     allowCreate = true,
+    expectedHumanIdentityId?: string,
   ): Promise<FederatedAuthenticationResult> {
     const consumed = await this.nonces.consume(
       verified.provider,
@@ -86,6 +96,10 @@ export class AuthenticateFederated {
       verified.provider,
       verified.providerSubject,
     );
+    if (expectedHumanIdentityId !== undefined &&
+        (existing === null || existing.humanIdentityId.value !== expectedHumanIdentityId)) {
+      throw new FederatedAuthenticationError("IDENTITY_UNAVAILABLE");
+    }
     // Registered previews may authenticate only already-linked, approved test
     // Humans. This guard runs before any identity/link/session/metadata mutation.
     if (this.permittedExistingPrincipals !== undefined &&
@@ -106,7 +120,7 @@ export class AuthenticateFederated {
         created: false,
         humanIdentityId: identity.id.value,
         providerEmail: existing.providerEmail,
-        session: await this.createSession.execute(identity.id),
+        session: await this.createSession.execute(identity.id, undefined, verified.provider.value as "apple"|"google"),
       };
     }
     if (!allowCreate) {
@@ -128,7 +142,7 @@ export class AuthenticateFederated {
       created: true,
       humanIdentityId: humanIdentity.id.value,
       providerEmail: federatedIdentity.providerEmail,
-      session: await this.createSession.execute(humanIdentity.id),
+      session: await this.createSession.execute(humanIdentity.id, undefined, verified.provider.value as "apple"|"google"),
     };
   }
 }

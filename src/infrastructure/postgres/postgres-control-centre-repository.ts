@@ -2,6 +2,7 @@ import { AppError } from "../../shared/errors.js";
 import type { DatabaseQuery } from "./database.js";
 import type { ConsoleHuman, ControlCentreRepository, HumanDirectoryQuery, HumanDirectoryRow, RecoveryRequest } from "../../control-plane/application/console-control-centre.js";
 import { resolvedDisplayName } from "../../control-plane/application/console-control-centre.js";
+import type { AssociationKind, HumanProductAssociation } from "../../control-plane/application/product-integration.js";
 
 // Explicit projections only. No password hash, provider subject or token column is selected.
 const verifiedEmail=`coalesce((SELECT normalized_email FROM credentials WHERE human_identity_id=h.id AND email_verified_at IS NOT NULL AND status='active' ORDER BY created_at LIMIT 1),
@@ -34,13 +35,13 @@ export class PostgresControlCentreRepository implements ControlCentreRepository 
   const r=await this.db.query<HumanDirectoryRow>(`WITH metadata AS (${selectedHuman}), candidates AS (SELECT *,${key} AS sort_key FROM metadata), selected AS (
     SELECT * FROM candidates h WHERE ($1='' OR strpos(lower(h.id),$1)>0 OR strpos(lower(coalesce(h.preferred_display_name,'')),$1)>0 OR EXISTS(SELECT 1 FROM credentials WHERE human_identity_id=h.id AND strpos(lower(normalized_email),$1)>0) OR EXISTS(SELECT 1 FROM federated_identities WHERE human_identity_id=h.id AND strpos(lower(coalesce(provider_email,'')),$1)>0))
     AND ($2='' OR status=$2) AND ($3='' OR ($3='email_password' AND EXISTS(SELECT 1 FROM credentials WHERE human_identity_id=h.id AND status='active')) OR EXISTS(SELECT 1 FROM federated_identities WHERE human_identity_id=h.id AND provider=$3 AND status='active'))
-    AND ($4='' OR EXISTS(SELECT 1 FROM human_product_participations WHERE human_identity_id=h.id AND product_id=$4) OR EXISTS(SELECT 1 FROM product_entitlements WHERE human_identity_id=h.id AND product_id=$4))
+    AND ($4='' OR ($8 IN ('participation','all') AND EXISTS(SELECT 1 FROM human_product_participations WHERE human_identity_id=h.id AND product_id=$4)) OR ($8 IN ('entitlement','all') AND EXISTS(SELECT 1 FROM product_entitlements WHERE human_identity_id=h.id AND product_id=$4)))
     AND ($7='all' OR ($7 IN ('production','test') AND purpose=$7) OR ($7 IN ('suspended','retired') AND status=$7)
  OR ($7='needs_review' AND purpose='unknown') OR ($7='duplicates' AND EXISTS(SELECT 1 FROM (SELECT human_identity_id,lower(trim(normalized_email)) AS e FROM credentials UNION ALL SELECT human_identity_id,lower(trim(provider_email)) AS e FROM federated_identities WHERE provider_email IS NOT NULL) own JOIN (SELECT human_identity_id,lower(trim(normalized_email)) AS e FROM credentials UNION ALL SELECT human_identity_id,lower(trim(provider_email)) AS e FROM federated_identities WHERE provider_email IS NOT NULL) other ON own.e=other.e AND own.human_identity_id<>other.human_identity_id WHERE own.human_identity_id=h.id)))
     AND ($5::text IS NULL OR (sort_key COLLATE "C",id COLLATE "C") ${descending?'<':'>'} ($5 COLLATE "C",$6 COLLATE "C"))
     ORDER BY sort_key COLLATE "C" ${descending?'DESC':'ASC'},id COLLATE "C" ${descending?'DESC':'ASC'} LIMIT 51)
    ${projection},h.sort_key AS "sortKey" FROM selected h ORDER BY h.sort_key COLLATE "C" ${descending?'DESC':'ASC'},h.id COLLATE "C" ${descending?'DESC':'ASC'}`,
-   [input.query?.trim().toLowerCase()??'',input.status??'',input.provider??'',input.productId??'',after?.key??null,after?.id??null,input.filter??"all"]);
+   [input.query?.trim().toLowerCase()??'',input.status??'',input.provider??'',input.productId??'',after?.key??null,after?.id??null,input.filter??"all",input.relationship??"all"]);
   return r.rows.map(row=>({...human(row),sortKey:row.sortKey}));
  }
  async human(id:string) {const r=await this.db.query<ConsoleHuman>(`WITH selected AS (${selectedHuman} WHERE h.id=$1) ${projection} FROM selected h`,[id]);return r.rows[0]?human(r.rows[0]):null;}
@@ -72,9 +73,26 @@ export class PostgresControlCentreRepository implements ControlCentreRepository 
   const r=revision===0?await this.db.query("INSERT INTO human_profiles(human_identity_id,preferred_display_name,revision,updated_at) VALUES($1,$2,1,$3) ON CONFLICT(human_identity_id) DO NOTHING",[id,name,now]):await this.db.query("UPDATE human_profiles SET preferred_display_name=$2,revision=revision+1,updated_at=$3 WHERE human_identity_id=$1 AND revision=$4",[id,name,now,revision]);return r.rowCount===1;
  }
  async registerParticipation(id:string,product:string,workload:string,now:Date) {
+  // Recheck and lock the canonical principals within the registration transaction.
+  // A workload cannot report another registered product or a non-active Human.
+  const authority=await this.db.query<{humanStatus:string;productStatus:string;workloadStatus:string;workloadProduct:string}>(`SELECT h.status AS "humanStatus",p.status AS "productStatus",w.status AS "workloadStatus",w.product_id AS "workloadProduct" FROM human_identities h CROSS JOIN registered_products p CROSS JOIN product_workloads w WHERE h.id=$1 AND p.id=$2 AND w.id=$3 FOR SHARE OF h,p,w`,[id,product,workload]);
+  const principal=authority.rows[0];
+  if(!principal||principal.humanStatus!=="active"||principal.productStatus!=="active"||principal.workloadStatus!=="active"||principal.workloadProduct!==product)throw new AppError('Canonical product participation authority is unavailable','PARTICIPATION_AUTHORITY_INVALID',403);
   const r=await this.db.query("INSERT INTO human_product_participations(human_identity_id,product_id,workload_id,status,created_at,updated_at) VALUES($1,$2,$3,'active',$4,$4) ON CONFLICT(human_identity_id,product_id) DO NOTHING",[id,product,workload,now]);
   if(r.rowCount===0){const existing=await this.db.query<{status:string}>("SELECT status FROM human_product_participations WHERE human_identity_id=$1 AND product_id=$2",[id,product]);if(existing.rows[0]?.status!=='active')throw new AppError('This participation is inactive and requires separate review','PARTICIPATION_INACTIVE',409);}
   return r.rowCount===1;
+ }
+ async humanParticipationStatus(id:string,product:string) {
+  const result=await this.db.query<{status:string}>("SELECT status FROM human_product_participations WHERE human_identity_id=$1 AND product_id=$2",[id,product]);return result.rows[0]?.status??null;
+ }
+ async humanProducts(id:string,relationship:AssociationKind,after:{key:string;id:string}|null) {
+  if(after&&after.key!==after.id)throw new AppError('Refresh this product list','INVALID_CURSOR',400);
+  const result=await this.db.query<HumanProductAssociation>(`SELECT p.id AS "productId",p.display_name AS "displayName",
+    (SELECT status FROM human_product_participations WHERE human_identity_id=$1 AND product_id=p.id) AS "participationStatus",
+    coalesce((SELECT json_agg(json_build_object('tenantId',tenant_id,'status',status) ORDER BY tenant_id) FROM product_entitlements WHERE human_identity_id=$1 AND product_id=p.id),'[]'::json) AS entitlements
+    FROM registered_products p WHERE (($2 IN ('participation','all') AND EXISTS(SELECT 1 FROM human_product_participations WHERE human_identity_id=$1 AND product_id=p.id)) OR ($2 IN ('entitlement','all') AND EXISTS(SELECT 1 FROM product_entitlements WHERE human_identity_id=$1 AND product_id=p.id)))
+    AND ($3::text IS NULL OR p.id COLLATE "C">$3 COLLATE "C") ORDER BY p.id COLLATE "C" LIMIT 51`,[id,relationship,after?.id??null]);
+  return result.rows;
  }
  async dependencyCounts(id:string,now:Date) {
   const r=await this.db.query<{activeSessions:number;renewableSessions:number;totalSessions:number;provisioningReferences:number;emailChallenges:number;appleRevocationReferences:number}>(`SELECT

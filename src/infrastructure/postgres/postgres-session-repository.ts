@@ -12,6 +12,7 @@ interface SessionRow {
   human_identity_id: string;
   created_at: Date;
   authenticated_at: Date;
+  authentication_method: "email_password"|"apple"|"google"|null;
   last_accessed_at: Date;
   expires_at: Date;
   status: SessionStatus;
@@ -27,9 +28,9 @@ export class PostgresSessionRepository implements SessionRepository {
     await this.database.query(
       `INSERT INTO sessions (
          id, human_identity_id, created_at, last_accessed_at,
-         expires_at, status, renewal_token_hash, renewal_expires_at, authenticated_at
+         expires_at, status, renewal_token_hash, renewal_expires_at, authenticated_at, authentication_method
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (id) DO UPDATE SET
          last_accessed_at = EXCLUDED.last_accessed_at,
          status = CASE WHEN sessions.status = 'revoked' THEN 'revoked' ELSE EXCLUDED.status END,
@@ -45,6 +46,7 @@ export class PostgresSessionRepository implements SessionRepository {
         snapshot.renewalTokenHash,
         snapshot.renewalExpiresAt,
         snapshot.authenticatedAt ?? snapshot.createdAt,
+        snapshot.authenticationMethod ?? null,
       ],
     );
   }
@@ -114,7 +116,7 @@ export class PostgresSessionRepository implements SessionRepository {
 
 const selectSession = `
   SELECT id, human_identity_id, created_at, last_accessed_at,
-         expires_at, status, renewal_token_hash, renewal_expires_at, authenticated_at
+         expires_at, status, renewal_token_hash, renewal_expires_at, authenticated_at, authentication_method
   FROM sessions
 `;
 
@@ -126,6 +128,7 @@ function toSession(row: SessionRow | undefined): Session | null {
         humanIdentityId: HumanIdentityId.from(row.human_identity_id),
         createdAt: row.created_at,
         authenticatedAt: row.authenticated_at,
+        authenticationMethod: row.authentication_method,
         lastAccessedAt: row.last_accessed_at,
         expiresAt: row.expires_at,
         status: row.status,

@@ -9,8 +9,10 @@ import type { Clock } from "../../shared/clock.js";
 import { SessionId } from "../../sessions/domain/session-id.js";
 import { AppError } from "../../shared/errors.js";
 import type { GoogleRecoveryVerification } from "./google-recovery-verification.js";
+import { integrationFacts, type AssociationKind, type HumanProductAssociation, type ProductIntegration } from "./product-integration.js";
+import type { RecoveryOverviewIssue } from "./recovery-overview.js";
 
-export interface HumanDirectoryQuery { filter?: "all"|"production"|"test"|"duplicates"|"needs_review"|"inactive"|"suspended"|"retired"|undefined; query?: string|undefined; status?: string|undefined; provider?: string|undefined; productId?: string|undefined; sort?: "name"|"created"|"activity"|"id"|undefined; cursor?: string|undefined }
+export interface HumanDirectoryQuery { filter?: "all"|"production"|"test"|"duplicates"|"needs_review"|"inactive"|"suspended"|"retired"|undefined; query?: string|undefined; status?: string|undefined; provider?: string|undefined; productId?: string|undefined; relationship?:AssociationKind|undefined; sort?: "name"|"created"|"activity"|"id"|undefined; cursor?: string|undefined }
 export interface ConsoleHuman {
   humanIdentityId: string; preferredDisplayName: string|null; displayName: string; displayNameSource: string;
   email: string|null; status: string; createdAt: string; lastActivityAt: string|null;
@@ -32,13 +34,15 @@ export interface ControlCentreRepository {
   profile(id:string):Promise<{humanIdentityId:string;preferredDisplayName:string|null;revision:number}>;
   updateProfile(id:string,name:string|null,expectedRevision:number,now:Date):Promise<boolean>;
   registerParticipation(human:string,product:string,workload:string,now:Date):Promise<boolean>;
+  humanProducts(human:string,relationship:AssociationKind,after:{key:string;id:string}|null):Promise<HumanProductAssociation[]>;
+  humanParticipationStatus(human:string,product:string):Promise<string|null>;
   dependencyCounts(id:string,now:Date):Promise<{activeSessions:number;renewableSessions:number;totalSessions:number;provisioningReferences:number;emailChallenges:number;appleRevocationReferences:number}>;
   requests(after:{key:string;id:string}|null):Promise<RecoveryRequest[]>;
   saveRequest(value:RecoveryRequest):Promise<void>;
   requestForUpdate(id:string):Promise<RecoveryRequest|null>;
 }
 
-export function directoryFingerprint(input:HumanDirectoryQuery) { return createHash("sha256").update(JSON.stringify([input.query?.trim().toLowerCase()??"",input.status??"",input.provider??"",input.productId??"",input.sort??"created",input.filter??"all"])).digest("hex"); }
+export function directoryFingerprint(input:HumanDirectoryQuery) { return createHash("sha256").update(JSON.stringify([input.query?.trim().toLowerCase()??"",input.status??"",input.provider??"",input.productId??"",input.sort??"created",input.filter??"all",input.relationship??"all"])).digest("hex"); }
 export function pageCursor(scope:string,key:string,id:string) { return Buffer.from(JSON.stringify({scope,key,id}),"utf8").toString("base64url"); }
 export function readCursor(value:string|undefined,scope:string) {
   if (!value) return null;
@@ -59,7 +63,9 @@ export class ConsoleControlCentre {
     private readonly control:ControlPlaneRepository,private readonly identities:HumanIdentityRepository,
     private readonly sessions:SessionRepository,private readonly plane:ControlPlane,private readonly clock:Clock,
     private readonly atomically:<T>(work:()=>Promise<T>)=>Promise<T>,private readonly configuredApps:readonly string[],
-    private readonly scopedVerification?:GoogleRecoveryVerification) {}
+    private readonly scopedVerification?:GoogleRecoveryVerification,
+    private readonly integrations:readonly ProductIntegration[]=[],private readonly isolatedBackfillEnabled=false,
+    private readonly recoverySignals?:(session:SessionId,actor:string)=>Promise<RecoveryOverviewIssue[]>) {}
   private async session(id:SessionId,fresh=false) {
     const s=await this.sessions.findById(id);
     if(!s||s.status!=="active"||s.expiresAt<=this.clock.now())throw new AppError("Sign in to continue","SESSION_INVALID",401);
@@ -90,12 +96,33 @@ export class ConsoleControlCentre {
     const actor=await this.admin(id),products=await this.repository.products();
     await this.audit(actor,"platform.products.inspected","product-directory");
     const aliases:Record<string,readonly string[]>={"coco-the-llama":["coco-web"],cashcast:["cashcast-preview"]};
-    return {products:products.map(p=>({...p,authenticationConfigurationPresent:this.configuredApps.some(a=>a===p.id||aliases[p.id]?.includes(a)),participationCoverage:p.workloads>0?"reporting_contract_available":"no_authenticated_reporting_workload"}))};
+    return {products:products.map(p=>({...p,authenticationConfigurationPresent:this.configuredApps.some(a=>a===p.id||aliases[p.id]?.includes(a)),participationCoverage:p.workloads>0?"reporting_contract_available":"no_authenticated_reporting_workload",...integrationFacts(this.integrations.find(i=>i.productId===p.id))}))};
+  }
+  async productHumans(id:SessionId,input:{productId:string;relationship?:AssociationKind|undefined;query?:string|undefined;cursor?:string|undefined}) {
+    const actor=await this.admin(id);
+    if(!await this.control.findProduct(input.productId))throw new AppError("Product is unavailable","PRODUCT_NOT_FOUND",404);
+    const query:HumanDirectoryQuery={productId:input.productId,relationship:input.relationship??"participation",sort:"id",query:input.query};
+    const scope=directoryFingerprint(query),rows=await this.repository.humans(query,readCursor(input.cursor,scope));
+    await this.audit(actor,"platform.product.humans.inspected",input.productId,{relationship:query.relationship!,resultCount:String(Math.min(rows.length,50))});
+    return {humans:rows.slice(0,50).map(({sortKey,...human})=>human),nextCursor:rows.length>50?pageCursor(scope,rows[49]!.sortKey,rows[49]!.humanIdentityId):null};
+  }
+  async humanProducts(id:SessionId,input:{humanIdentityId:string;relationship?:AssociationKind|undefined;cursor?:string|undefined}) {
+    const actor=await this.admin(id);
+    if(!await this.identities.findById(HumanIdentityId.from(input.humanIdentityId)))throw new AppError("Human is unavailable","IDENTITY_NOT_FOUND",404);
+    const relationship=input.relationship??"participation",scope=`human-products:${input.humanIdentityId}:${relationship}`;
+    const rows=await this.repository.humanProducts(input.humanIdentityId,relationship,readCursor(input.cursor,scope));
+    await this.audit(actor,"platform.human.products.inspected",input.humanIdentityId,{relationship,resultCount:String(Math.min(rows.length,50))});
+    return {products:rows.slice(0,50),nextCursor:rows.length>50?pageCursor(scope,rows[49]!.productId,rows[49]!.productId):null};
   }
   async overview(id:SessionId) {
     const actor=await this.admin(id),summary=await this.repository.summary();
     const recent=await this.repository.activity({},null);
     const issues=[];
+    for(const integration of this.integrations.filter(i=>i.integrationStatus==="gama_identity"&&i.participationRecording==="missing")) {
+      const product=await this.control.findProduct(integration.productId);
+      if(product)issues.push({id:`participation-${product.id}`,title:"Product participation needs integration",detail:`${product.displayName} uses GAMA Identity according to reviewed evidence, but participation reporting is missing. Customer usage is not yet fully represented.`,action:"Review integration",destination:"products"});
+    }
+    if(this.recoverySignals)issues.push(...await this.recoverySignals(id,actor));
     if((summary.testCandidates??0)>0)issues.push({id:"test-candidates",title:"Development aliases awaiting review",detail:`${summary.testCandidates} Humans match the owner's development alias family. Purpose has not been confirmed.`,action:"Review classification",destination:"test_review"});
     if((summary.testIdentities??0)>0)issues.push({id:"test-identities",title:"Confirmed test identities",detail:`${summary.testIdentities} Humans are explicitly classified as test. Dependencies and lifecycle eligibility require separate review.`,action:"Review test identities",destination:"test_identities"});
     if(summary.duplicateEmailGroups>0)issues.push({id:"possible-duplicates",title:"Possible duplicate identities",detail:`${summary.duplicateEmailGroups} repeated email groups need review. A shared email does not establish ownership.`,action:"Review identities",destination:"duplicates"});
@@ -125,10 +152,58 @@ export class ConsoleControlCentre {
   async participate(id:SessionId,workloadId:string,secret:string) {
     return this.atomically(async()=>{const s=await this.session(id);const workload=await this.plane.authenticateWorkload(workloadId,secret);
       if(!workload)throw new AppError("Product reporting authorization is required","WORKLOAD_INVALID",401);
+      this.assertParticipationApplicable(workload.productId);
       const human=s.humanIdentityId.value;
       const created=await this.repository.registerParticipation(human,workload.productId,workload.workloadId,this.clock.now());
       if(created)await this.audit(human,"human.product.participation.registered",human,{productId:workload.productId});
       return {humanIdentityId:human,productId:workload.productId,status:"active",created};
+    });
+  }
+  private assertParticipationApplicable(productId:string) {
+    const integration=this.integrations.find(i=>i.productId===productId);
+    if(integration&&["cloudkit_only","login_free","other_identity"].includes(integration.integrationStatus))throw new AppError("This product does not use GAMA Human participation","PARTICIPATION_NOT_APPLICABLE",403);
+  }
+  /** Called only after successful server-side web authentication for this exact configured app. */
+  async participateFromWebAuthentication(id:SessionId,appId:string) {
+    const integration=this.integrations.find(i=>i.webAppIds.includes(appId));
+    if(!integration)return null;
+    return this.atomically(async()=>{
+      const s=await this.session(id),workload=await this.control.findWorkload(integration.reportingWorkloadId!);
+      if(!workload||workload.status!=="active"||workload.productId!==integration.productId)throw new AppError("Product participation reporting is unavailable","PARTICIPATION_REPORTING_UNAVAILABLE",503);
+      const product=await this.control.findProduct(workload.productId);
+      if(product?.status!=="active")throw new AppError("Product participation reporting is unavailable","PARTICIPATION_REPORTING_UNAVAILABLE",503);
+      const human=s.humanIdentityId.value,created=await this.repository.registerParticipation(human,workload.productId,workload.id,this.clock.now());
+      if(created)await this.audit(human,"human.product.participation.registered",human,{productId:workload.productId,source:"verified_web_authentication",appId});
+      return {humanIdentityId:human,productId:workload.productId,status:"active",created};
+    });
+  }
+  /** Preview only: the product workload must attest canonical references; email correspondence is never used. */
+  async previewParticipationBackfill(id:SessionId,workloadId:string,secret:string,entries:readonly {humanIdentityId:string;evidenceReference:string}[]) {
+    const actor=await this.admin(id),workload=await this.plane.authenticateWorkload(workloadId,secret);
+    if(!workload)throw new AppError("Product reporting authorization is required","WORKLOAD_INVALID",401);
+    this.assertParticipationApplicable(workload.productId);
+    if(entries.length>100||entries.some(e=>!e.humanIdentityId||e.humanIdentityId.length>200||!e.evidenceReference||e.evidenceReference.length>240||/[\p{Cc}\p{Cf}]/u.test(e.evidenceReference)))throw new AppError("Canonical backfill references are invalid","INVALID_REQUEST",400);
+    const rows=[];
+    for(const entry of entries){
+      const human=await this.identities.findById(HumanIdentityId.from(entry.humanIdentityId));
+      const existing=human?await this.repository.humanParticipationStatus(entry.humanIdentityId,workload.productId):null;
+      rows.push({...entry,productId:workload.productId,status:human?.status!=="active"?"human_unavailable":existing==="active"?"already_recorded":existing?"inactive_requires_review":"eligible_canonical_workload_assertion"});
+    }
+    await this.audit(actor,"human.product.participation.backfill.previewed",workload.productId,{referenceCount:String(rows.length),source:"product_workload_canonical_assertion"});
+    return {productId:workload.productId,rows,productionExecutionAvailable:false,correspondenceAuthority:"authenticated_product_workload_assertion",warning:"Only canonical product records proven by the reporting workload may be submitted. Memberships, entitlements and email matches do not establish participation."};
+  }
+  /** No HTTP execution route. Strict localhost synthetic test gate supplied by the runtime. */
+  async simulateParticipationBackfill(id:SessionId,workloadId:string,secret:string,entries:readonly {humanIdentityId:string;evidenceReference:string}[]) {
+    if(!this.isolatedBackfillEnabled)throw new AppError("Participation backfill execution remains disabled","PARTICIPATION_BACKFILL_DISABLED",403);
+    return this.atomically(async()=>{
+      const actor=await this.admin(id,true),preview=await this.previewParticipationBackfill(id,workloadId,secret,entries),results=[];
+      for(const row of preview.rows){
+        if(!["already_recorded","eligible_canonical_workload_assertion"].includes(row.status)){results.push({...row,created:false});continue;}
+        const created=await this.repository.registerParticipation(row.humanIdentityId,preview.productId,workloadId,this.clock.now());
+        if(created)await this.audit(actor,"human.product.participation.backfilled",row.humanIdentityId,{productId:preview.productId,evidenceReference:row.evidenceReference,environment:"isolated_synthetic"});
+        results.push({...row,created});
+      }
+      return {productId:preview.productId,results,environment:"isolated_synthetic"};
     });
   }
   async registerProduct(id:SessionId,input:{id:string;displayName:string}) {

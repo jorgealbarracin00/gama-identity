@@ -34,6 +34,10 @@ export function syntheticManagementEnabled(
     return (
       config.NODE_ENV === "test" &&
       config.REPOSITORY_MODE === "postgres" &&
+      ["postgres:", "postgresql:"].includes(u.protocol) &&
+      // pg permits query host/port overrides. Reject all query options so this
+      // test-only safety gate and the actual connection select the same target.
+      u.search === "" && u.hash === "" &&
       ["127.0.0.1", "localhost"].includes(u.hostname) &&
       /^\/[a-z0-9_]+_management_test$/.test(u.pathname)
     );
@@ -139,8 +143,10 @@ export class IdentityManagement {
       purpose: Purpose;
       reason: string;
       revision: number;
+      actor_human_identity_id: string;
+      updated_at: Date;
     }>(
-      "SELECT purpose,reason,revision FROM human_purposes WHERE human_identity_id=$1",
+      "SELECT purpose,reason,revision,actor_human_identity_id,updated_at FROM human_purposes WHERE human_identity_id=$1",
       [id],
     );
     return {
@@ -148,6 +154,8 @@ export class IdentityManagement {
       purpose: r.rows[0]?.purpose ?? "unknown",
       classificationReason: r.rows[0]?.reason ?? null,
       classificationRevision: r.rows[0]?.revision ?? 0,
+      classifiedBy: r.rows[0]?.actor_human_identity_id ?? null,
+      classifiedAt: r.rows[0]?.updated_at.toISOString() ?? null,
       activity: activityClassification(human.lastActivityAt, this.clock.now()),
       lifecycle: human.status,
       potentialTestCandidate: human.authenticationMethods.some((m) =>
@@ -185,7 +193,7 @@ export class IdentityManagement {
           ((r.counts?.ownership ?? 0) > 0 || (r.counts?.retention ?? 0) > 0),
       );
     const pending = await this.db.query<{ count: number }>(
-      `SELECT ((SELECT count(*) FROM identity_management_cases WHERE (source_human_identity_id=$1 OR target_human_identity_id=$1) AND state IN ('awaiting_proof','verified') AND expires_at>$2 AND ($3::uuid IS NULL OR id<>$3))+(SELECT count(*) FROM identity_recovery_requests WHERE (source_human_identity_id=$1 OR target_human_identity_id=$1) AND state='review_required'))::int AS count`,
+      `SELECT ((SELECT count(*) FROM identity_management_cases WHERE (source_human_identity_id=$1 OR target_human_identity_id=$1) AND state IN ('awaiting_proof','verified') AND expires_at>$2 AND ($3::uuid IS NULL OR id<>$3))+(SELECT count(*) FROM identity_recovery_requests WHERE (source_human_identity_id=$1 OR target_human_identity_id=$1) AND state='review_required')+(SELECT count(*) FROM identity_recovery_compensations c JOIN identity_management_operations o ON o.id=c.original_request_id WHERE (o.result->>'sourceHumanIdentityId'=$1 OR o.result->>'targetHumanIdentityId'=$1) AND c.state IN ('awaiting_proof','verified') AND c.expires_at>$2 AND ($3::uuid IS NULL OR c.id<>$3)))::int AS count`,
       [id, this.clock.now(), ignoreCase],
     );
     const pendingRecoveryReferences = pending.rows[0]!.count;
@@ -212,9 +220,32 @@ export class IdentityManagement {
       "SELECT count(*)::int AS count FROM sessions WHERE human_identity_id=$1 AND status<>'revoked'",
       [id],
     );
+    const localCounts = (await this.db.query<{credentials:number; providers:number; roles:number; memberships:number; owners:number; participation:number; entitlements:number}>(
+      `SELECT (SELECT count(*) FROM credentials WHERE human_identity_id=$1)::int credentials,
+       (SELECT count(*) FROM federated_identities WHERE human_identity_id=$1)::int providers,
+       (SELECT count(*) FROM platform_administration_memberships WHERE human_identity_id=$1)::int roles,
+       (SELECT count(*) FROM tenant_memberships WHERE human_identity_id=$1)::int memberships,
+       (SELECT count(*) FROM tenant_memberships WHERE human_identity_id=$1 AND tenant_role='owner')::int owners,
+       (SELECT count(*) FROM human_product_participations WHERE human_identity_id=$1)::int participation,
+       (SELECT count(*) FROM product_entitlements WHERE human_identity_id=$1)::int entitlements`, [id]
+    )).rows[0]!;
+    const central = (key:string, count:number) => ({category:key, status:count>0?'dependencies_present':'verified_clear', count, authority:'gama_identity'});
+    const external = (key:string, reportKey:string) => ({category:key,
+      status:unknown?'unknown':reports.rows.some(r=>(r.counts?.[reportKey]??0)>0)?'dependencies_present':'verified_clear',
+      count:unknown?null:reports.rows.reduce((n,r)=>n+(r.counts?.[reportKey]??0),0), authority:'authenticated_product_inspectors'});
+    const categories = [central('credentials',localCounts.credentials),central('authentication_providers',localCounts.providers),
+      central('active_sessions',counts.activeSessions),central('renewable_sessions',counts.renewableSessions),
+      central('platform_roles',localCounts.roles),central('business_ownership',localCounts.owners),central('business_memberships',localCounts.memberships),
+      central('product_participation',localCounts.participation),central('product_entitlements',localCounts.entitlements),
+      central('pending_recovery',pendingRecoveryReferences),central('identity_challenges',counts.emailChallenges+counts.appleRevocationReferences),
+      central('provisioning_operations',counts.provisioningReferences),external('subscriptions','subscriptions'),external('product_local_data','localAccounts'),
+      external('product_permissions','permissions'),external('product_ownership','ownership'),external('background_jobs','backgroundJobs'),
+      external('pending_product_operations','pendingOperations'),external('other_product_references','externalReferences'),external('retention_obligations','retention')];
     const result = {
       ...m,
       counts,
+      categories,
+      protectedStatus: protectedIdentity ? 'blocked' : 'verified_clear',
       nonRevokedSessionCount: nonRevoked.rows[0]!.count,
       sessions: sessionRows.rows,
       sessionDisplayTruncated: counts.totalSessions > 100,
@@ -620,6 +651,11 @@ export class IdentityManagement {
       const id = randomUUID(),
         nonce = randomBytes(32).toString("base64url"),
         now = this.clock.now();
+      const superseded = await this.db.query<{ id: string }>(
+        "UPDATE identity_management_cases SET state='cancelled' WHERE actor_human_identity_id=$1 AND source_human_identity_id=$2 AND target_human_identity_id=$3 AND provider='google' AND state IN ('awaiting_proof','verified') RETURNING id",
+        [a.humanIdentityId, source, target],
+      );
+      await this.auditSupersededCases(a.humanIdentityId, "recovery", superseded.rows, id);
       await this.db.query(
         `INSERT INTO identity_management_cases(id,actor_human_identity_id,source_human_identity_id,target_human_identity_id,provider,nonce,state,created_at,expires_at) VALUES($1,$2,$3,$4,'google',$5,'awaiting_proof',$6,$7)`,
         [
@@ -655,6 +691,48 @@ export class IdentityManagement {
     if (!c || c.actor_human_identity_id !== actor)
       throw new AppError("Recovery case not found", "RECOVERY_NOT_FOUND", 404);
     return c;
+  }
+  async authorizeOwnerAuthentication(token: SessionId, caseId?: string, kind: "recovery" | "compensation" = "recovery"): Promise<string> {
+    const actor = await this.admin(token);
+    this.gate();
+    if (!caseId) return actor.humanIdentityId;
+    const now = this.clock.now();
+    if (kind === "compensation") {
+      const c = await this.compensation(caseId, actor.humanIdentityId);
+      if (c.state !== "awaiting_proof" || c.expires_at <= now)
+        reject("CONTROL_INVALID", "Start a new compensation verification before authenticating its primary.");
+      return (await this.transferReceipt(c.original_request_id, actor.humanIdentityId)).targetHumanIdentityId;
+    }
+    const c = await this.case(caseId, actor.humanIdentityId);
+    if (c.state !== "awaiting_proof" || c.expires_at <= now)
+      reject("CONTROL_INVALID", "Start a new recovery verification before authenticating its primary.");
+    return c.target_human_identity_id;
+  }
+  async authenticateExistingOwnerApple<T>(token: SessionId, input: {caseId?: string; kind?: "recovery" | "compensation"}, work: (expectedHumanIdentityId: string) => Promise<T>): Promise<T> {
+    await this.admin(token); this.gate();
+    return this.db.withIdentityManagementTransaction(async () => {
+      const actor = await this.admin(token);
+      const expected = await this.authorizeOwnerAuthentication(token, input.caseId, input.kind);
+      const result = await work(expected);
+      await this.audit(actor.humanIdentityId, "recovery.owner.apple.authenticated", input.caseId ?? expected, {
+        ownerHumanIdentityId: expected,
+        scope: input.caseId ? input.kind ?? "recovery" : "administrator_step_up",
+      });
+      return result;
+    });
+  }
+  private async auditSupersededCases(actor: string, kind: "recovery" | "compensation", cases: readonly { id: string }[], replacementId: string) {
+    for (const previous of cases) {
+      const handoffs = await this.db.query(
+        "UPDATE identity_management_google_handoffs SET state='cancelled',code_verifier=NULL WHERE case_id=$1 AND case_kind=$2 AND actor_id=$3 AND state IN ('awaiting_callback','processing','verified') RETURNING id",
+        [previous.id, kind, actor],
+      );
+      await this.audit(actor, kind === "recovery" ? "recovery.control.superseded" : "recovery.compensation.superseded", previous.id, {
+        replacementCaseId: replacementId,
+        cancelledHandoffCount: String(handoffs.rowCount ?? 0),
+        history: "retained",
+      });
+    }
   }
   async proveRecovery(
     token: SessionId,
@@ -772,16 +850,88 @@ export class IdentityManagement {
       };
     });
   }
+  /** Fresh Google OIDC proof controls the exact existing source; no source session or Human is created. */
+  async proveNativeRecovery(token: SessionId, input: {caseId:string; targetSession:string; identityToken:string}) {
+    await this.admin(token, true); this.gate();
+    const actor = await this.admin(token, true);
+    const loaded = await this.db.withTransaction(()=>this.case(input.caseId,actor.humanIdentityId));
+    let verified;
+    try { verified = await this.verifiers.verify(FederatedIdentityProvider.from('google'),{identityToken:input.identityToken,nonce:loaded.nonce}); }
+    catch { throw new AppError('Google ownership could not be verified','OWNERSHIP_INVALID',403); }
+    return this.db.withIdentityManagementTransaction(async()=>{
+      const a=await this.admin(token,true), c=await this.case(input.caseId,a.humanIdentityId), now=this.clock.now();
+      if(c.state!=='awaiting_proof'||c.expires_at<=now||verified.expiresAt<=now) reject('PROOF_EXPIRED_OR_USED','Start a new recovery verification.');
+      const target=await this.owner(SessionId.from(input.targetSession),true);
+      if(!['email_password','apple'].includes(target.authenticationMethod ?? 'unknown')) reject('PRIMARY_METHOD_REQUIRED','Fresh Apple or Email sign-in to the primary is required.');
+      if(target.humanIdentityId.value!==c.target_human_identity_id||target.authenticatedAt<c.created_at) reject('CONTROL_INVALID','Fresh sign-in to the selected primary after preparation is required.');
+      await this.federated.lockProviderSubject(verified.provider,verified.providerSubject);
+      const relationship=await this.federated.findByProviderSubject(verified.provider,verified.providerSubject);
+      if(!relationship||relationship.status!=='active'||relationship.humanIdentityId.value!==c.source_human_identity_id) reject('SUBJECT_CONFLICT','The verified Google account does not belong to the selected source.');
+      if((await this.humans.findById(relationship.humanIdentityId))?.status!=='active') reject('HUMAN_NOT_ACTIVE','The selected source is not active.');
+      if(!await this.nonces.consume(verified.provider,verified.nonceHash,verified.expiresAt,now)) reject('PROOF_REPLAY','Use a fresh Google verification.');
+      const until=new Date(Math.min(now.getTime()+300000,verified.expiresAt.getTime(),c.expires_at.getTime()));
+      for(const proof of [{hash:digest(target.id.value),human:c.target_human_identity_id,kind:'session'},
+        {hash:digest({caseId:c.id,nonceHash:verified.nonceHash,relationshipId:relationship.id.value}),human:c.source_human_identity_id,kind:'provider'}]) {
+        const r=await this.db.query('INSERT INTO identity_management_control_proofs(session_hash,case_id,human_identity_id,expires_at,proof_kind) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',[proof.hash,c.id,proof.human,until,proof.kind]);
+        if(r.rowCount!==1) reject('CONTROL_REPLAY','Fresh account-control proof is required for this case.');
+      }
+      await this.db.query("UPDATE identity_management_cases SET state='verified',relationship_id=$2,proof_expires_at=$3 WHERE id=$1",[c.id,relationship.id.value,until]);
+      await this.audit(a.humanIdentityId,'recovery.control.verified',c.id,{source:c.source_human_identity_id,target:c.target_human_identity_id,provider:'google',subjectMatch:'true',sourceControl:'fresh_provider_proof'});
+      return {caseId:c.id,controlVerified:true,providerSubjectMatched:true,expiresAt:until.toISOString()};
+    });
+  }
   private async recoveryPreview(c: RecoveryCase) {
+    const now = this.clock.now();
     const source = await this.assess(c.source_human_identity_id, c.id),
       target = await this.assess(c.target_human_identity_id, c.id),
       blockers: string[] = [];
     if (
       c.state !== "verified" ||
       !c.proof_expires_at ||
-      c.proof_expires_at <= this.clock.now()
+      c.proof_expires_at <= now ||
+      c.expires_at <= now
     )
       blockers.push("FRESH_CONTROL_REQUIRED");
+    // A saved verification does not outlive the exact owner-control evidence.
+    // Keep Preview aligned with execution so revoked/expired sessions never appear ready.
+    if (c.state === "verified") {
+      const relationship = await this.federated.findActiveByHumanIdentityAndProvider(
+        HumanIdentityId.from(c.source_human_identity_id), FederatedIdentityProvider.from("google"),
+      );
+      if (!relationship || relationship.id.value !== c.relationship_id)
+        blockers.push("RELATIONSHIP_CHANGED");
+      const proofs = await this.db.query<{
+        human_identity_id: string;
+        session_hash: string;
+        proof_kind: string;
+        expires_at: Date;
+      }>(
+        "SELECT human_identity_id,session_hash,proof_kind,expires_at FROM identity_management_control_proofs WHERE case_id=$1",
+        [c.id],
+      );
+      for (const id of [c.source_human_identity_id, c.target_human_identity_id]) {
+        const proof = proofs.rows.find((p) => p.human_identity_id === id);
+        if (!proof || proof.expires_at <= now) {
+          if (!blockers.includes("CONTROL_EXPIRED")) blockers.push("CONTROL_EXPIRED");
+          continue;
+        }
+        if (proof.proof_kind === "provider") {
+          if (id !== c.source_human_identity_id || !c.relationship_id) {
+            blockers.push("CONTROL_INVALID");
+            continue;
+          }
+          continue;
+        }
+        if (proof.proof_kind !== "session") {
+          blockers.push("CONTROL_INVALID");
+          continue;
+        }
+        const ownerSessions = await this.sessions.listByHumanIdentityId(HumanIdentityId.from(id));
+        if (!ownerSessions.some((s) => digest(s.id.value) === proof.session_hash && s.status === "active" && s.expiresAt > now)) {
+          if (!blockers.includes("CONTROL_REVOKED")) blockers.push("CONTROL_REVOKED");
+        }
+      }
+    }
     if (source.lifecycle !== "active" || target.lifecycle !== "active")
       blockers.push("HUMAN_NOT_ACTIVE");
     if (source.protectedIdentity) blockers.push("PROTECTED_SOURCE");
@@ -825,6 +975,7 @@ export class IdentityManagement {
       target,
       blockers,
       reviewDigest,
+      proofExpiresAt: c.proof_expires_at?.toISOString(),
       executionEnabled: this.executionEnabled,
       sessionImpact,
       sourceWillLoseSignIn: true,
@@ -885,9 +1036,10 @@ export class IdentityManagement {
       const proofs = await this.db.query<{
         human_identity_id: string;
         session_hash: string;
+        proof_kind: string;
         expires_at: Date;
       }>(
-        "SELECT human_identity_id,session_hash,expires_at FROM identity_management_control_proofs WHERE case_id=$1",
+        "SELECT human_identity_id,session_hash,proof_kind,expires_at FROM identity_management_control_proofs WHERE case_id=$1",
         [c.id],
       );
       for (const id of [
@@ -897,6 +1049,10 @@ export class IdentityManagement {
         const proof = proofs.rows.find((x) => x.human_identity_id === id);
         if (!proof || proof.expires_at <= this.clock.now())
           reject("CONTROL_EXPIRED", "Verify control again.");
+        if (proof.proof_kind === 'provider') {
+          if (id !== c.source_human_identity_id || !c.relationship_id) reject('CONTROL_INVALID','Provider proof is valid only for the exact source relationship.');
+          continue; // The relationship ID, current source ownership and provider lock are checked below.
+        }
         const sessions = await this.sessions.listByHumanIdentityId(
           HumanIdentityId.from(id),
         );
@@ -965,9 +1121,14 @@ export class IdentityManagement {
           "POSTCONDITION_FAILED",
           "Recovery verification failed; no changes were committed.",
         );
+      const revision = (await this.db.query<{write_revision:string}>("SELECT write_revision::text FROM federated_identities WHERE id=$1",[c.relationship_id])).rows[0]!.write_revision;
       const result = {
         caseId: c.id,
         requestId: input.requestId,
+        relationshipId: c.relationship_id,
+        relationshipRevision: revision,
+        compensationPolicy: 'Separate receipt-bound verification and approval; revoke current owner sessions; never restore old sessions',
+        compensationAvailable: true,
         sourceHumanIdentityId: c.source_human_identity_id,
         targetHumanIdentityId: c.target_human_identity_id,
         provider: "google",
@@ -988,6 +1149,111 @@ export class IdentityManagement {
         result,
       );
       return result;
+    });
+  }
+  private async transferReceipt(id:string,actor:string) {
+    const r=await this.db.query<{kind:string;actor_human_identity_id:string;result:{caseId:string;requestId:string;sourceHumanIdentityId:string;targetHumanIdentityId:string;provider:string;state:string;relationshipId?:string;relationshipRevision?:string}}>(
+      'SELECT kind,actor_human_identity_id,result FROM identity_management_operations WHERE id=$1',[id]);
+    const row=r.rows[0];
+    if(!row||row.actor_human_identity_id!==actor||row.kind!=='google_transfer'||row.result.state!=='completed') throw new AppError('Recovery receipt not found','RECEIPT_NOT_FOUND',404);
+    if(!row.result.relationshipId||!row.result.relationshipRevision) reject('COMPENSATION_UNSUPPORTED','This receipt lacks a verified post-transfer relationship revision. Separate recovery review is required.');
+    return row.result;
+  }
+  private async compensation(id:string,actor:string) {
+    const r=await this.db.query<{id:string;original_request_id:string;actor_human_identity_id:string;nonce:string;state:string;created_at:Date;expires_at:Date;proof_expires_at:Date|null;target_session_hash:string|null}>(
+      'SELECT * FROM identity_recovery_compensations WHERE id=$1 FOR UPDATE',[id]);
+    const c=r.rows[0];
+    if(!c||c.actor_human_identity_id!==actor) throw new AppError('Compensation request not found','COMPENSATION_NOT_FOUND',404);
+    return c;
+  }
+  async prepareCompensation(token:SessionId,originalRequestId:string) {
+    await this.admin(token,true); this.gate();
+    return this.db.withIdentityManagementTransaction(async()=>{
+      const a=await this.admin(token,true),receipt=await this.transferReceipt(originalRequestId,a.humanIdentityId),now=this.clock.now();
+      if((await this.db.query("SELECT 1 FROM identity_recovery_compensations WHERE original_request_id=$1 AND state='completed'",[originalRequestId])).rows.length) reject('COMPENSATION_EXISTS','Review the existing compensation request.');
+      const caseId=randomUUID(),nonce=randomBytes(32).toString('base64url'),expiresAt=new Date(now.getTime()+900000);
+      const superseded=await this.db.query<{id:string}>("UPDATE identity_recovery_compensations SET state='cancelled' WHERE original_request_id=$1 AND actor_human_identity_id=$2 AND state IN ('awaiting_proof','verified') RETURNING id",[originalRequestId,a.humanIdentityId]);
+      await this.auditSupersededCases(a.humanIdentityId,'compensation',superseded.rows,caseId);
+      await this.db.query("INSERT INTO identity_recovery_compensations(id,original_request_id,actor_human_identity_id,nonce,state,created_at,expires_at) VALUES($1,$2,$3,$4,'awaiting_proof',$5,$6)",[caseId,originalRequestId,a.humanIdentityId,nonce,now,expiresAt]);
+      await this.audit(a.humanIdentityId,'recovery.compensation.requested',caseId,{originalRequestId});
+      return {caseId,originalRequestId,nonce,expiresAt:expiresAt.toISOString(),sourceHumanIdentityId:receipt.sourceHumanIdentityId,targetHumanIdentityId:receipt.targetHumanIdentityId,nextAction:'Freshly authenticate the surviving primary and verify the same Google account for this receipt-bound request.'};
+    });
+  }
+  async proveCompensation(token:SessionId,input:{caseId:string;targetSession:string;identityToken:string}) {
+    await this.admin(token,true);this.gate();
+    const actor=await this.admin(token,true),loaded=await this.db.withTransaction(()=>this.compensation(input.caseId,actor.humanIdentityId));
+    let verified;
+    try { verified=await this.verifiers.verify(FederatedIdentityProvider.from('google'),{identityToken:input.identityToken,nonce:loaded.nonce}); }
+    catch { throw new AppError('Fresh Google control could not be verified','OWNERSHIP_INVALID',403); }
+    return this.db.withIdentityManagementTransaction(async()=>{
+      const a=await this.admin(token,true),c=await this.compensation(input.caseId,a.humanIdentityId),receipt=await this.transferReceipt(c.original_request_id,a.humanIdentityId),now=this.clock.now();
+      if(c.state!=='awaiting_proof'||c.expires_at<=now||verified.expiresAt<=now) reject('PROOF_EXPIRED_OR_USED','Start a new compensation verification.');
+      const target=await this.owner(SessionId.from(input.targetSession),true);
+      if(!['email_password','apple'].includes(target.authenticationMethod ?? 'unknown')) reject('PRIMARY_METHOD_REQUIRED','Compensation requires fresh Apple or Email control of the primary, separately from Google.');
+      if(target.humanIdentityId.value!==receipt.targetHumanIdentityId||target.authenticatedAt<c.created_at) reject('CONTROL_INVALID','Fresh sign-in to the exact surviving primary is required.');
+      await this.federated.lockProviderSubject(verified.provider,verified.providerSubject);
+      const relationship=await this.federated.findByProviderSubject(verified.provider,verified.providerSubject);
+      if(!relationship||relationship.id.value!==receipt.relationshipId||relationship.status!=='active'||relationship.humanIdentityId.value!==receipt.targetHumanIdentityId) reject('RELATIONSHIP_CHANGED','The Google relationship no longer matches the original receipt.');
+      if(!await this.nonces.consume(verified.provider,verified.nonceHash,verified.expiresAt,now)) reject('PROOF_REPLAY','Use fresh Google verification.');
+      const until=new Date(Math.min(now.getTime()+300000,verified.expiresAt.getTime(),c.expires_at.getTime()));
+      const hash=digest(target.id.value);
+      // Owner-session evidence is globally single-use across recovery and compensation requests.
+      const inserted=await this.db.query('INSERT INTO identity_management_control_proofs(session_hash,case_id,human_identity_id,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[hash,receipt.caseId,receipt.targetHumanIdentityId,until]);
+      if(inserted.rowCount!==1) reject('CONTROL_REPLAY','Use a new primary sign-in for compensation.');
+      await this.db.query("UPDATE identity_recovery_compensations SET state='verified',proof_expires_at=$2,target_session_hash=$3 WHERE id=$1",[c.id,until,hash]);
+      await this.audit(a.humanIdentityId,'recovery.compensation.control_verified',c.id,{originalRequestId:c.original_request_id,subjectMatch:'true'});
+      return {caseId:c.id,controlVerified:true,providerSubjectMatched:true,expiresAt:until.toISOString()};
+    });
+  }
+  private async compensationPreview(c:Awaited<ReturnType<IdentityManagement['compensation']>>) {
+    const receipt=await this.transferReceipt(c.original_request_id,c.actor_human_identity_id),source=await this.assess(receipt.sourceHumanIdentityId,c.id),target=await this.assess(receipt.targetHumanIdentityId,c.id),blockers:string[]=[];
+    if(c.state!=='verified'||!c.proof_expires_at||c.proof_expires_at<=this.clock.now()||c.expires_at<=this.clock.now()) blockers.push('FRESH_CONTROL_REQUIRED');
+    if(source.lifecycle!=='active'||target.lifecycle!=='active') blockers.push('HUMAN_NOT_ACTIVE');
+    if(source.protectedIdentity||source.relationshipsPresent) blockers.push('SOURCE_DEPENDENCIES_PRESENT');
+    if(source.unknownCoverage) blockers.push('SOURCE_DEPENDENCIES_UNKNOWN');
+    if(source.human.authenticationMethods.length) blockers.push('SOURCE_AUTHENTICATION_CHANGED');
+    if(!target.human.authenticationMethods.some(m=>m.status==='active'&&(m.method==='apple'||m.method==='email_password'))) blockers.push('TARGET_REMAINING_ACCESS_REQUIRED');
+    const relationship=(await this.db.query<{human_identity_id:string;provider:string;status:string;write_revision:string}>(
+      'SELECT human_identity_id,provider,status,write_revision::text FROM federated_identities WHERE id=$1',[receipt.relationshipId])).rows[0];
+    if(!relationship||relationship.human_identity_id!==receipt.targetHumanIdentityId||relationship.provider!=='google'||relationship.status!=='active'||relationship.write_revision!==receipt.relationshipRevision) blockers.push('RELATIONSHIP_CHANGED');
+    const proofSessions=await this.sessions.listByHumanIdentityId(HumanIdentityId.from(receipt.targetHumanIdentityId));
+    if(!proofSessions.some(s=>digest(s.id.value)===c.target_session_hash&&s.status==='active'&&s.expiresAt>this.clock.now())) blockers.push('CONTROL_REVOKED');
+    const originalProofs=(await this.db.query('SELECT human_identity_id FROM identity_management_control_proofs WHERE case_id=$1',[receipt.caseId])).rows;
+    if(!originalProofs.some(p=>p.human_identity_id===receipt.sourceHumanIdentityId)||!originalProofs.some(p=>p.human_identity_id===receipt.targetHumanIdentityId)) blockers.push('ORIGINAL_CONTROL_HISTORY_MISSING');
+    return {caseId:c.id,originalRequestId:c.original_request_id,source,target,blockers,executionEnabled:this.executionEnabled,proofExpiresAt:c.proof_expires_at?.toISOString(),
+      affectedTargetSessionCount:target.nonRevokedSessionCount,
+      plannedChanges:['Return only the receipt-bound Google relationship to its original Human','Revoke all current primary sessions because provider attribution is unavailable','Keep all previously revoked source sessions revoked; fresh authentication is required','Preserve both Humans, profiles, roles, participation, entitlements and all application data'],
+      automaticRollback:false,
+      reviewDigest:digest({caseId:c.id,receipt,source:source.reviewDigest,target:target.reviewDigest,proofExpiresAt:c.proof_expires_at,relationship})};
+  }
+  async previewCompensation(token:SessionId,caseId:string) {
+    return this.db.withTransaction(async()=>{const a=await this.admin(token),c=await this.compensation(caseId,a.humanIdentityId),p=await this.compensationPreview(c);
+      await this.audit(a.humanIdentityId,'recovery.compensation.previewed',caseId);return p;});
+  }
+  async executeCompensation(token:SessionId,input:{caseId:string;requestId:string;reviewDigest:string;confirmation:string;revokeTargetSessions:boolean;acceptFreshSignIn:boolean}) {
+    await this.admin(token,true);this.gate();
+    return this.db.withIdentityManagementTransaction(async()=>{
+      const a=await this.admin(token,true),intent=digest(input),prev=await this.previous(input.requestId,a.humanIdentityId,'google_compensation',intent);if(prev)return prev;
+      const c=await this.compensation(input.caseId,a.humanIdentityId),p=await this.compensationPreview(c),receipt=await this.transferReceipt(c.original_request_id,a.humanIdentityId);
+      if(p.blockers.length)reject('COMPENSATION_BLOCKED',p.blockers.join(', '));
+      if(p.reviewDigest!==input.reviewDigest)reject('REVIEW_CHANGED','Evidence changed. Refresh the preview.');
+      if(input.confirmation!==`return google ${receipt.targetHumanIdentityId} to ${receipt.sourceHumanIdentityId} receipt ${c.original_request_id}`||!input.revokeTargetSessions||!input.acceptFreshSignIn)reject('CONFIRMATION_REQUIRED','Confirm the exact receipt, both Humans and primary-session invalidation.');
+      const provider=FederatedIdentityProvider.from('google');
+      await this.federated.lockHumanProvider(HumanIdentityId.from(receipt.targetHumanIdentityId),provider);
+      await this.federated.lockHumanProvider(HumanIdentityId.from(receipt.sourceHumanIdentityId),provider);
+      const relationship=await this.federated.findActiveByHumanIdentityAndProvider(HumanIdentityId.from(receipt.targetHumanIdentityId),provider);
+      if(!relationship||relationship.id.value!==receipt.relationshipId)reject('RELATIONSHIP_CHANGED','The Google relationship no longer matches the original receipt.');
+      await this.federated.lockProviderSubject(provider,relationship.providerSubject);
+      relationship.disable(this.clock);await this.federated.save(relationship);
+      relationship.reassignTo(HumanIdentityId.from(receipt.sourceHumanIdentityId),this.clock);relationship.activate(this.clock);await this.federated.save(relationship);
+      await this.sessions.revokeByHumanIdentityId(HumanIdentityId.from(receipt.targetHumanIdentityId));
+      await this.sessions.revokeByHumanIdentityId(HumanIdentityId.from(receipt.sourceHumanIdentityId));
+      const restored=await this.federated.findActiveByHumanIdentityAndProvider(HumanIdentityId.from(receipt.sourceHumanIdentityId),provider);
+      if(restored?.id.value!==receipt.relationshipId||(await this.sessions.listByHumanIdentityId(HumanIdentityId.from(receipt.targetHumanIdentityId))).some(s=>s.status!=='revoked')||(await this.sessions.listByHumanIdentityId(HumanIdentityId.from(receipt.sourceHumanIdentityId))).some(s=>s.status!=='revoked'))reject('POSTCONDITION_FAILED','Compensation failed verification; no changes were committed.');
+      await this.db.query("UPDATE identity_recovery_compensations SET state='completed' WHERE id=$1",[c.id]);
+      const result={caseId:c.id,requestId:input.requestId,originalRequestId:c.original_request_id,sourceHumanIdentityId:receipt.sourceHumanIdentityId,targetHumanIdentityId:receipt.targetHumanIdentityId,provider:'google',state:'completed',oldSessionsRestored:false};
+      await this.audit(a.humanIdentityId,'recovery.google.compensated',c.id,{originalRequestId:c.original_request_id,requestId:input.requestId,sourceSessions:'remain_revoked',targetSessions:'revoked',records:'retained'});
+      await this.record(input.requestId,a.humanIdentityId,'google_compensation',intent,result);return result;
     });
   }
 }

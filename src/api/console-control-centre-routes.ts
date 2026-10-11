@@ -20,6 +20,14 @@ export function consoleControlCentreRoutes(services:IdentityServices):FastifyPlu
  app.post('/administration/platform/humans/query',async(req,rep)=>handle(req,rep,(c,id)=>c.directory(id,parse(directory,req.body))));
  app.post('/administration/platform/humans/details',async(req,rep)=>handle(req,rep,(c,id)=>c.detail(id,parse(z.object({humanIdentityId:identifier}).strict(),req.body).humanIdentityId)));
  app.post('/administration/platform/products/inspect',async(req,rep)=>handle(req,rep,(c,id)=>{parse(z.object({}).strict(),req.body??{});return c.productDirectory(id);}));
+ app.post('/administration/platform/products/humans/query',async(req,rep)=>handle(req,rep,(c,id)=>c.productHumans(id,parse(z.object({productId:identifier,relationship:z.enum(['participation','entitlement','all']).optional(),query:z.string().trim().max(320).optional(),cursor}).strict(),req.body))));
+ app.post('/administration/platform/humans/products/query',async(req,rep)=>handle(req,rep,(c,id)=>c.humanProducts(id,parse(z.object({humanIdentityId:identifier,relationship:z.enum(['participation','entitlement','all']).optional(),cursor}).strict(),req.body))));
+ app.post('/administration/platform/products/participation/backfill/preview',async(req,rep)=>handle(req,rep,(c,id)=>{
+  const input=parse(z.object({entries:z.array(z.object({humanIdentityId:identifier,evidenceReference:z.string().trim().min(1).max(240).regex(/^[^\p{Cc}\p{Cf}]+$/u)}).strict()).max(100)}).strict(),req.body);
+  const workload=req.headers['x-gama-workload-id'],secret=req.headers['x-gama-workload-secret'];
+  if(typeof workload!=='string'||typeof secret!=='string'||workload.length>200||secret.length>4096)throw new AppError('Product reporting authorization is required','WORKLOAD_INVALID',401);
+  return c.previewParticipationBackfill(id,workload,secret,input.entries);
+ }));
  app.post('/administration/platform/products/register',async(req,rep)=>handle(req,rep,(c,id)=>c.registerProduct(id,parse(z.object({id:z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),displayName:z.string().trim().min(1).max(160).regex(/^[^\p{Cc}\p{Cf}]+$/u)}).strict(),req.body))));
  app.post('/administration/platform/activity/query',async(req,rep)=>handle(req,rep,(c,id)=>c.activity(id,parse(z.object({eventType:z.string().regex(/^[a-z][a-z0-9.-]{0,127}$/).optional(),cursor}).strict(),req.body))));
  app.get('/profile',async(req,rep)=>handle(req,rep,(c,id)=>c.selfProfile(id)));

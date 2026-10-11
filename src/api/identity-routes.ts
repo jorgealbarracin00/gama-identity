@@ -146,9 +146,11 @@ export function identityRoutes(
       }
       try {
         const result = await authentication.execute({ authorizationCode: credential.data.authorizationCode, nonce: credential.data.nonce });
+        const participation = await reportAuthenticatedWebParticipation(services, request, result.session.sessionId, credential.data.appId);
         return reply.send({
           session: result.session,
           account: { email: result.providerEmail },
+          ...(participation === null ? {} : { participationRegistration: participation }),
         });
       } catch (error) {
         if (error instanceof AppleAuthorizationCodeExchangeError) {
@@ -190,9 +192,11 @@ export function identityRoutes(
       }
       try {
         const result = await authentication.execute({ authorizationCode: credential.data.authorizationCode, nonce: credential.data.nonce, codeVerifier: credential.data.codeVerifier });
+        const participation = await reportAuthenticatedWebParticipation(services, request, result.session.sessionId, credential.data.appId);
         return reply.send({
           session: result.session,
           account: { email: result.providerEmail },
+          ...(participation === null ? {} : { participationRegistration: participation }),
         });
       } catch (error) {
         if (error instanceof GoogleAuthorizationCodeExchangeError) {
@@ -434,6 +438,18 @@ export function identityRoutes(
       return reply.send(result);
     });
   };
+}
+
+/** Reporting is independently audited and must not discard an already authenticated session on outage. */
+async function reportAuthenticatedWebParticipation(services: IdentityServices, request: FastifyRequest, session: string, appId: string | undefined) {
+  if (!appId || !services.administration.controlCentre) return null;
+  try {
+    const result = await services.administration.controlCentre.participateFromWebAuthentication(SessionId.from(session), appId);
+    return result === null ? null : { status: "recorded", productId: result.productId };
+  } catch {
+    request.log.warn("Authentication succeeded; configured product participation reporting requires retry");
+    return { status: "retry_required" };
+  }
 }
 
 function translateAuthenticationMethodsError(error: unknown): Error {
