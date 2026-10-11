@@ -30,13 +30,13 @@ assert.ok(syntheticManagementEnabled({NODE_ENV:'test',DATABASE_URL:url,REPOSITOR
 const config=loadConfig({NODE_ENV:'test',REPOSITORY_MODE:'postgres',DATABASE_URL:url,LOG_LEVEL:'silent',PASSWORD_HASH_MEMORY_KIB:'8192',PASSWORD_HASH_ITERATIONS:'2'});
 const runtime=await buildRuntime(config),db=new PostgresDatabase(url,false,()=>{},true),clock=new SystemClock();
 const plane=new PostgresControlPlaneRepository(db),humans=new PostgresHumanIdentityRepository(db),sessions=new PostgresSessionRepository(db),federated=new PostgresFederatedIdentityRepository(db),nonces=new PostgresFederatedAuthenticationNonceRepository(db);
-const keys=await generateKeyPair('RS256'),verifiers=new FederatedIdentityTokenVerifiers([new GoogleIdentityTokenVerifier({clientIds:['synthetic-client'],keyResolver:async()=>keys.publicKey})]);
+const keys=await generateKeyPair('RS256'),verifiers=new FederatedIdentityTokenVerifiers([new GoogleIdentityTokenVerifier({clientIds:['synthetic-client'],maximumAuthenticationAgeSeconds:300,keyResolver:async()=>keys.publicKey})]);
 const principals=new AdministrationPrincipals(plane,humans,runtime.controlPlane);
 const management=new IdentityManagement(db,new PostgresControlCentreRepository(db),principals,plane,humans,sessions,federated,nonces,verifiers,clock,true,runtime.controlPlane);
 const auth=new AuthenticateFederated(verifiers,federated,nonces,humans,new UuidHumanIdentityIdGenerator(),new UuidFederatedIdentityIdGenerator(),new CreateSession(sessions,new UuidSessionIdGenerator(),clock,3600,undefined,2592000,humans),clock,w=>db.withTransaction(w));
 const password='Synthetic-demonstration-password-123!',workloadSecret='Synthetic-demonstration-workload-123!';
 const nonce=()=>randomBytes(32).toString('base64url');
-async function jwt(n:string,subject='synthetic-google-owner'){return new SignJWT({nonce:n}).setProtectedHeader({alg:'RS256'}).setIssuer('https://accounts.google.com').setAudience('synthetic-client').setSubject(subject).setIssuedAt().setExpirationTime('5m').sign(keys.privateKey);}
+async function jwt(n:string,subject='synthetic-google-owner'){return new SignJWT({nonce:n,auth_time:Math.floor(Date.now()/1000)}).setProtectedHeader({alg:'RS256'}).setIssuer('https://accounts.google.com').setAudience('synthetic-client').setSubject(subject).setIssuedAt().setExpirationTime('5m').sign(keys.privateKey);}
 async function google(){const n=nonce();return auth.execute({provider:'google',nonce:n,identityToken:await jwt(n)});}
 const zero={localAccounts:0,subscriptions:0,permissions:0,ownership:0,backgroundJobs:0,pendingOperations:0,externalReferences:0,retention:0};
 const report=(id:string)=>management.reportDependencies('synthetic-workload',workloadSecret,{humanIdentityId:id,counts:zero,evidenceReference:'isolated-product-empty-no-other-writers',observedAt:new Date().toISOString()});

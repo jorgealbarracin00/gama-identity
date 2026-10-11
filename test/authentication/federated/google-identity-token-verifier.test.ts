@@ -23,6 +23,7 @@ describe("Google identity-token verification", () => {
   let privateKey: CryptoKey;
   let otherPrivateKey: CryptoKey;
   let verifier: GoogleIdentityTokenVerifier;
+  let recovery: GoogleIdentityTokenVerifier;
 
   before(async () => {
     const primary = await generateKeyPair("RS256", { modulusLength: 2048 });
@@ -30,6 +31,7 @@ describe("Google identity-token verification", () => {
     privateKey = primary.privateKey;
     otherPrivateKey = other.privateKey;
     const publicJwk: JWK = { ...(await exportJWK(primary.publicKey)), kid: "google-test-key", alg: "RS256" };
+    recovery=new GoogleIdentityTokenVerifier({clientIds:["dedicated-recovery-client"],keyResolver:createLocalJWKSet({keys:[publicJwk]}),clock,maximumAuthenticationAgeSeconds:300});
     verifier = new GoogleIdentityTokenVerifier({
       clientIds: [audience],
       keyResolver: createLocalJWKSet({ keys: [publicJwk] }),
@@ -105,12 +107,41 @@ describe("Google identity-token verification", () => {
     }));
   });
 
+  it("keeps normal Google sign-in compatible with missing or old auth_time", async()=>{
+    await verifier.verify({identityToken:await token(),nonce:rawNonce});
+    await verifier.verify({identityToken:await token({auth_time:0}),nonce:rawNonce});
+  });
+  it("requires the dedicated recovery audience and a signed fresh auth_time",async()=>{
+    const fresh=Math.floor(clock.now().getTime()/1000);
+    const valid=await recovery.verify({identityToken:await token({auth_time:fresh},{tokenAudience:'dedicated-recovery-client'}),nonce:rawNonce});
+    assert.equal(valid.providerSubject.value,'google-subject-1');
+    await rejectsWith('WRONG_AUDIENCE',async()=>recovery.verify({identityToken:await token({auth_time:fresh}),nonce:rawNonce}));
+    await rejectsWith('MALFORMED_CREDENTIAL',async()=>recovery.verify({identityToken:await token({}, {tokenAudience:'dedicated-recovery-client'}),nonce:rawNonce}));
+  });
+  it("rejects malformed/future recovery authentication timestamps even when signature and nonce match",async()=>{
+    for(const auth_time of ['fresh',null,1.5,-1,Math.floor(clock.now().getTime()/1000)+6])
+      await rejectsWith('MALFORMED_CREDENTIAL',async()=>recovery.verify({identityToken:await token({auth_time},{tokenAudience:'dedicated-recovery-client'}),nonce:rawNonce}));
+  });
+  it("rejects an old recovery authentication time with a newly issued unexpired token",async()=>{
+    await rejectsWith('EXPIRED_CREDENTIAL',async()=>recovery.verify({identityToken:await token({auth_time:Math.floor(clock.now().getTime()/1000)-301},{tokenAudience:'dedicated-recovery-client'}),nonce:rawNonce}));
+    await recovery.verify({identityToken:await token({auth_time:Math.floor(clock.now().getTime()/1000)-300},{tokenAudience:'dedicated-recovery-client'}),nonce:rawNonce});
+  });
+  it("rejects invalid recovery freshness policy configuration",()=>{
+    for(const maximumAuthenticationAgeSeconds of [0,-1,301,1.5,NaN])assert.throws(()=>new GoogleIdentityTokenVerifier({clientIds:[audience],maximumAuthenticationAgeSeconds}));
+  });
+  it("rejects cross-client presenters and audience arrays only in the strict recovery policy",async()=>{
+    const auth_time=Math.floor(clock.now().getTime()/1000);
+    for(const [claims,tokenAudience] of [[{auth_time,azp:'other-client'},'dedicated-recovery-client'],[{auth_time},['dedicated-recovery-client','other-client']],[{auth_time,azp:42},'dedicated-recovery-client']] as const)
+      await rejectsWith('WRONG_AUDIENCE',async()=>recovery.verify({identityToken:await token(claims,{tokenAudience:typeof tokenAudience==='string'?tokenAudience:[...tokenAudience]}),nonce:rawNonce}));
+    await recovery.verify({identityToken:await token({auth_time,azp:'dedicated-recovery-client'},{tokenAudience:'dedicated-recovery-client'}),nonce:rawNonce});
+    await verifier.verify({identityToken:await token({azp:'other-client'},{tokenAudience:[audience,'other-client']}),nonce:rawNonce});
+  });
   async function token(
     claims: Record<string, unknown> = {},
     options: {
       signingKey?: CryptoKey;
       tokenIssuer?: string;
-      tokenAudience?: string;
+      tokenAudience?: string | string[];
       tokenSubject?: string | null;
       expiresAt?: string;
     } = {},

@@ -850,8 +850,13 @@ export class IdentityManagement {
       };
     });
   }
+  /** Recheck a claimed browser handoff inside the same exclusive proof transaction after network verification. */
+  private async assertCurrentHandoff(id:string,caseId:string,actor:string,target:string,kind:'recovery'|'compensation') {
+    const current=await this.db.query("SELECT 1 FROM identity_management_google_handoffs WHERE id=$1 AND case_id=$2 AND actor_id=$3 AND target_id=$4 AND case_kind=$5 AND state='processing' AND expires_at>$6 FOR UPDATE",[id,caseId,actor,target,kind,this.clock.now()]);
+    if (!current.rows.length) reject('HANDOFF_EXPIRED_OR_USED','Start a new browser verification.');
+  }
   /** Fresh Google OIDC proof controls the exact existing source; no source session or Human is created. */
-  async proveNativeRecovery(token: SessionId, input: {caseId:string; targetSession:string; identityToken:string}) {
+  async proveNativeRecovery(token: SessionId, input: {caseId:string; targetSession:string; identityToken:string}, handoffId?: string) {
     await this.admin(token, true); this.gate();
     const actor = await this.admin(token, true);
     const loaded = await this.db.withTransaction(()=>this.case(input.caseId,actor.humanIdentityId));
@@ -861,6 +866,7 @@ export class IdentityManagement {
     return this.db.withIdentityManagementTransaction(async()=>{
       const a=await this.admin(token,true), c=await this.case(input.caseId,a.humanIdentityId), now=this.clock.now();
       if(c.state!=='awaiting_proof'||c.expires_at<=now||verified.expiresAt<=now) reject('PROOF_EXPIRED_OR_USED','Start a new recovery verification.');
+      if (handoffId) await this.assertCurrentHandoff(handoffId,c.id,a.humanIdentityId,c.target_human_identity_id,'recovery');
       const target=await this.owner(SessionId.from(input.targetSession),true);
       if(!['email_password','apple'].includes(target.authenticationMethod ?? 'unknown')) reject('PRIMARY_METHOD_REQUIRED','Fresh Apple or Email sign-in to the primary is required.');
       if(target.humanIdentityId.value!==c.target_human_identity_id||target.authenticatedAt<c.created_at) reject('CONTROL_INVALID','Fresh sign-in to the selected primary after preparation is required.');
@@ -1179,7 +1185,7 @@ export class IdentityManagement {
       return {caseId,originalRequestId,nonce,expiresAt:expiresAt.toISOString(),sourceHumanIdentityId:receipt.sourceHumanIdentityId,targetHumanIdentityId:receipt.targetHumanIdentityId,nextAction:'Freshly authenticate the surviving primary and verify the same Google account for this receipt-bound request.'};
     });
   }
-  async proveCompensation(token:SessionId,input:{caseId:string;targetSession:string;identityToken:string}) {
+  async proveCompensation(token:SessionId,input:{caseId:string;targetSession:string;identityToken:string},handoffId?:string) {
     await this.admin(token,true);this.gate();
     const actor=await this.admin(token,true),loaded=await this.db.withTransaction(()=>this.compensation(input.caseId,actor.humanIdentityId));
     let verified;
@@ -1188,6 +1194,7 @@ export class IdentityManagement {
     return this.db.withIdentityManagementTransaction(async()=>{
       const a=await this.admin(token,true),c=await this.compensation(input.caseId,a.humanIdentityId),receipt=await this.transferReceipt(c.original_request_id,a.humanIdentityId),now=this.clock.now();
       if(c.state!=='awaiting_proof'||c.expires_at<=now||verified.expiresAt<=now) reject('PROOF_EXPIRED_OR_USED','Start a new compensation verification.');
+      if (handoffId) await this.assertCurrentHandoff(handoffId,c.id,a.humanIdentityId,receipt.targetHumanIdentityId,'compensation');
       const target=await this.owner(SessionId.from(input.targetSession),true);
       if(!['email_password','apple'].includes(target.authenticationMethod ?? 'unknown')) reject('PRIMARY_METHOD_REQUIRED','Compensation requires fresh Apple or Email control of the primary, separately from Google.');
       if(target.humanIdentityId.value!==receipt.targetHumanIdentityId||target.authenticatedAt<c.created_at) reject('CONTROL_INVALID','Fresh sign-in to the exact surviving primary is required.');

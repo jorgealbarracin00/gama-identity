@@ -33,6 +33,8 @@ export interface GoogleIdentityTokenVerifierOptions {
   readonly clientIds: readonly string[];
   readonly keyResolver?: JWTVerifyGetKey;
   readonly clock?: Clock;
+  /** Recovery-only policy; omission preserves existing product sign-in. */
+  readonly maximumAuthenticationAgeSeconds?: number;
 }
 
 export class GoogleIdentityTokenVerifier implements FederatedIdentityTokenVerifier {
@@ -40,6 +42,7 @@ export class GoogleIdentityTokenVerifier implements FederatedIdentityTokenVerifi
   private readonly clientIds: string[];
   private readonly keyResolver: JWTVerifyGetKey;
   private readonly clock: Clock;
+  private readonly maximumAuthenticationAgeSeconds: number | undefined;
 
   constructor(options: GoogleIdentityTokenVerifierOptions) {
     if (options.clientIds.length === 0 || options.clientIds.some((clientId) => clientId.trim().length === 0)) {
@@ -48,6 +51,9 @@ export class GoogleIdentityTokenVerifier implements FederatedIdentityTokenVerifi
     this.clientIds = [...new Set(options.clientIds)];
     this.keyResolver = options.keyResolver ?? createRemoteJWKSet(googleKeysURL);
     this.clock = options.clock ?? new SystemClock();
+    const maximumAge=options.maximumAuthenticationAgeSeconds;
+    if(maximumAge!==undefined && (!Number.isInteger(maximumAge)||maximumAge<1||maximumAge>300))throw new Error("Recovery authentication age is invalid");
+    this.maximumAuthenticationAgeSeconds=maximumAge;
   }
 
   async verify(input: FederatedCredentialInput): Promise<VerifiedFederatedCredential> {
@@ -64,7 +70,7 @@ export class GoogleIdentityTokenVerifier implements FederatedIdentityTokenVerifi
         algorithms: ["RS256"],
         issuer: googleIssuers,
         audience: this.clientIds,
-        requiredClaims: ["sub", "iat", "exp", "nonce"],
+        requiredClaims: ["sub", "iat", "exp", "nonce", ...(this.maximumAuthenticationAgeSeconds===undefined?[]:["auth_time"])],
         currentDate: this.clock.now(),
         clockTolerance: 5,
       });
@@ -75,6 +81,16 @@ export class GoogleIdentityTokenVerifier implements FederatedIdentityTokenVerifi
         throw new FederatedAuthenticationError("MALFORMED_CREDENTIAL");
       }
 
+      if(this.maximumAuthenticationAgeSeconds!==undefined) {
+        if(typeof payload.aud!=="string" || !this.clientIds.includes(payload.aud) ||
+          (payload.azp!==undefined && payload.azp!==payload.aud))
+          throw new FederatedAuthenticationError("WRONG_AUDIENCE");
+        const now=Math.floor(this.clock.now().getTime()/1000),authenticated=payload.auth_time;
+        if(typeof authenticated!=="number" || !Number.isInteger(authenticated) || authenticated<0 || authenticated>now+5)
+          throw new FederatedAuthenticationError("MALFORMED_CREDENTIAL");
+        if(now-authenticated>this.maximumAuthenticationAgeSeconds)
+          throw new FederatedAuthenticationError("EXPIRED_CREDENTIAL");
+      }
       let providerSubject: FederatedProviderSubject;
       try {
         providerSubject = FederatedProviderSubject.from(payload.sub);

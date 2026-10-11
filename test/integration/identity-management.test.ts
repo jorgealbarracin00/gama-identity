@@ -132,7 +132,7 @@ describe(
       audience = "synthetic-client",
       exp = 300,
     ) =>
-      new SignJWT({ nonce: n })
+      new SignJWT({ nonce: n, auth_time: Math.floor(Date.now()/1000) })
         .setProtectedHeader({ alg: "RS256" })
         .setIssuer("https://accounts.google.com")
         .setAudience(audience)
@@ -254,6 +254,7 @@ describe(
       const verifiers = new FederatedIdentityTokenVerifiers([
         new GoogleIdentityTokenVerifier({
           clientIds: ["synthetic-client"],
+          maximumAuthenticationAgeSeconds:300,
           keyResolver: async () => key.publicKey,
         }),
         new AppleIdentityTokenVerifier({clientIds:["synthetic-apple-client"],keyResolver:async()=>key.publicKey}),
@@ -1060,6 +1061,95 @@ describe(
       await db.query("UPDATE federated_identities SET write_revision=write_revision+1 WHERE human_identity_id=$1 AND provider='google'",[target]);
       assert.ok((await management.previewCompensation(token(),cp.caseId)).blockers.includes('RELATIONSHIP_CHANGED'));
       await assert.rejects(()=>management.executeCompensation(token(),input),/RELATIONSHIP_CHANGED/);
+    });
+    // Post-V2.2 compensation safety regressions use only this disposable
+    // PostgreSQL fixture. They do not broaden production execution authority.
+    it("compensation safety rejects a newly added source credential without changing ownership or sessions", async () => {
+      const {cp, input} = await compensationVerified();
+      await db.query("INSERT INTO credentials(id,human_identity_id,normalized_email,password_hash,status,created_at,updated_at) SELECT $1,$2,'new-source-control@synthetic.example',password_hash,'active',now(),now() FROM credentials WHERE human_identity_id=$3 LIMIT 1", [randomUUID(), source, target]);
+      assert.ok((await management.previewCompensation(token(), cp.caseId)).blockers.includes("SOURCE_AUTHENTICATION_CHANGED"));
+      const before = await ownerSnapshot();
+      await assert.rejects(() => management.executeCompensation(token(), input), /SOURCE_AUTHENTICATION_CHANGED/);
+      assert.deepEqual(await ownerSnapshot(), before);
+      assert.equal((await db.query("SELECT state FROM identity_recovery_compensations WHERE id=$1", [cp.caseId])).rows[0]!.state, "verified");
+    });
+    it("compensation safety rejects a new positive product dependency rather than treating it as incomplete or empty", async () => {
+      const {cp, input} = await compensationVerified();
+      await report(source, {...zero, localAccounts: 1});
+      const preview = await management.previewCompensation(token(), cp.caseId);
+      assert.ok(preview.blockers.includes("SOURCE_DEPENDENCIES_PRESENT"));
+      assert.equal(preview.source.unknownCoverage, false);
+      const before = await ownerSnapshot();
+      await assert.rejects(() => management.executeCompensation(token(), input), /SOURCE_DEPENDENCIES_PRESENT/);
+      assert.deepEqual(await ownerSnapshot(), before);
+    });
+    it("compensation safety rejects an exact Google relationship replacement and preserves both relationship histories", async () => {
+      const {cp, receipt, input} = await compensationVerified();
+      await db.query("UPDATE federated_identities SET status='disabled',write_revision=write_revision+1 WHERE id=$1", [receipt.relationshipId]);
+      const replacement = randomUUID();
+      await db.query("INSERT INTO federated_identities(id,human_identity_id,provider,provider_subject,status,created_at,updated_at) VALUES($1,$2,'google','synthetic-replacement-subject','active',now(),now())", [replacement, target]);
+      assert.ok((await management.previewCompensation(token(), cp.caseId)).blockers.includes("RELATIONSHIP_CHANGED"));
+      const before = await ownerSnapshot();
+      await assert.rejects(() => management.executeCompensation(token(), input), /RELATIONSHIP_CHANGED/);
+      assert.deepEqual(await ownerSnapshot(), before);
+      assert.equal((await db.query("SELECT id FROM federated_identities WHERE id=ANY($1::text[])", [[receipt.relationshipId, replacement]])).rows.length, 2);
+    });
+    it("compensation safety rejects a revoked exact primary proof after a previously clear review", async () => {
+      const {cp, input} = await compensationVerified();
+      await sessions.revoke(SessionId.from(targetSession));
+      assert.ok((await management.previewCompensation(token(), cp.caseId)).blockers.includes("CONTROL_REVOKED"));
+      const before = await ownerSnapshot();
+      await assert.rejects(() => management.executeCompensation(token(), input), /CONTROL_REVOKED/);
+      assert.deepEqual(await ownerSnapshot(), before);
+    });
+    it("compensation safety expires a stored verified proof even while the owner session remains active", async () => {
+      const {cp, input} = await compensationVerified();
+      await db.query("UPDATE identity_recovery_compensations SET proof_expires_at=now()-interval '1 second' WHERE id=$1", [cp.caseId]);
+      assert.equal((await sessions.findById(SessionId.from(targetSession)))?.status, "active");
+      assert.ok((await management.previewCompensation(token(), cp.caseId)).blockers.includes("FRESH_CONTROL_REQUIRED"));
+      const before = await ownerSnapshot();
+      await assert.rejects(() => management.executeCompensation(token(), input), /FRESH_CONTROL_REQUIRED/);
+      assert.deepEqual(await ownerSnapshot(), before);
+    });
+    it("compensation safety invalidates a saved review when the primary gains another credential", async () => {
+      const {cp, input} = await compensationVerified();
+      await db.query("INSERT INTO credentials(id,human_identity_id,normalized_email,password_hash,status,created_at,updated_at) SELECT $1,$2,'additional-primary-control@synthetic.example',password_hash,'active',now(),now() FROM credentials WHERE human_identity_id=$2 LIMIT 1", [randomUUID(), target]);
+      const preview = await management.previewCompensation(token(), cp.caseId);
+      assert.deepEqual(preview.blockers, []);
+      assert.notEqual(preview.reviewDigest, input.reviewDigest);
+      const before = await ownerSnapshot();
+      await assert.rejects(() => management.executeCompensation(token(), input), /Evidence changed/);
+      assert.deepEqual(await ownerSnapshot(), before);
+    });
+    it("compensation safety waits for a coordinated central dependency writer then rejects its committed new reference", async () => {
+      const {input} = await compensationVerified();
+      let ready!: () => void, release!: () => void;
+      const written = new Promise<void>(resolve => { ready = resolve; });
+      const barrier = new Promise<void>(resolve => { release = resolve; });
+      // Actual authenticated report method participates in the shared central
+      // transaction fence. The exclusive compensation must see its commit.
+      const writer = db.withTransaction(async () => {
+        await report(source, {...zero, pendingOperations: 1});
+        ready(); await barrier;
+      });
+      await written;
+      let finished = false;
+      const execution = management.executeCompensation(token(), input).then(
+        value => { finished = true; return {value}; },
+        error => { finished = true; return {error}; },
+      );
+      try {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(finished, false);
+      } finally { release(); }
+      await writer;
+      const result = await execution;
+      assert.ok("error" in result);
+      assert.match(String(result.error), /SOURCE_DEPENDENCIES_PRESENT/);
+      assert.equal((await federated.findActiveByHumanIdentityAndProvider(HumanIdentityId.from(target), FederatedIdentityProvider.from("google")))?.humanIdentityId.value, target);
+      assert.equal((await sessions.findById(SessionId.from(targetSession)))?.status, "active");
+      assert.equal((await db.query("SELECT id FROM platform_audit_events WHERE event_type='recovery.google.compensated'")).rows.length, 0);
+      assert.equal((await db.query("SELECT id FROM identity_management_operations WHERE id=$1", [input.requestId])).rows.length, 0);
     });
     it("compensation audit failure rolls back provider, sessions, case and receipt atomically",async()=>{
       const {cp,input}=await compensationVerified();

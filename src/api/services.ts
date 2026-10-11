@@ -1,4 +1,5 @@
 import { GoogleRecoveryHandoff } from "../control-plane/application/google-recovery-handoff.js";
+import { startGoogleRecoveryMaintenance } from "../control-plane/application/google-recovery-maintenance.js";
 import { IdentityManagement, syntheticManagementEnabled } from '../control-plane/application/identity-management.js';
 import { GoogleRecoveryVerification } from "../control-plane/application/google-recovery-verification.js";
 import { ConsoleControlCentre } from "../control-plane/application/console-control-centre.js";
@@ -256,9 +257,14 @@ export async function buildRuntime(
     (work) => database.withTransaction(work),
   );
 
-  const managementGoogleAudiences = [...new Set([...runtimeConfig.GOOGLE_CLIENT_IDS, ...(runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB ? [runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB.clientId] : [])])];
+  // Ownership recovery never broadens the existing product-authentication audiences.
+  const managementGoogleAudiences = runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB ? [runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB.clientId] : [];
   const identityManagement = new IdentityManagement(database,new PostgresControlCentreRepository(database),new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,identities,sessions,federatedIdentities,federatedNonces,
-          new FederatedIdentityTokenVerifiers([managementGoogleAudiences.length===0 ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER) : new GoogleIdentityTokenVerifier({clientIds:managementGoogleAudiences})]),clock,syntheticManagementEnabled(runtimeConfig),controlPlane,syntheticManagementEnabled(runtimeConfig)?[]:["cashcast","grocery-master",...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId==="coco-web"?"coco-the-llama":app.appId==="cashcast-preview"?"cashcast":app.appId)]);
+          new FederatedIdentityTokenVerifiers([managementGoogleAudiences.length===0 ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER) : new GoogleIdentityTokenVerifier({clientIds:managementGoogleAudiences,maximumAuthenticationAgeSeconds:300})]),clock,syntheticManagementEnabled(runtimeConfig),controlPlane,syntheticManagementEnabled(runtimeConfig)?[]:["cashcast","grocery-master",...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId==="coco-web"?"coco-the-llama":app.appId==="cashcast-preview"?"cashcast":app.appId)]);
+  const googleRecoveryHandoff = new GoogleRecoveryHandoff(database,identityManagement,sessions,identities,new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,clock,runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB);
+  const recoveryMaintenance = startGoogleRecoveryMaintenance(googleRecoveryHandoff,
+    identityManagement.executionEnabled && runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB !== undefined,
+    () => { logger.warn("Recovery handoff maintenance failed; transient cleanup will retry"); });
   return {
     services: {
       ...services,
@@ -276,7 +282,7 @@ export async function buildRuntime(
       controlPlane,
       administration: { ...administration,
         identityManagement,
-        googleRecoveryHandoff: new GoogleRecoveryHandoff(database,identityManagement,sessions,identities,new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,clock,runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB),
+        googleRecoveryHandoff,
         ...(googleVerification === undefined ? {} : { googleVerification }),
         controlCentre: new ConsoleControlCentre(new PostgresControlCentreRepository(database),
           new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,
@@ -294,7 +300,7 @@ export async function buildRuntime(
     controlPlane,
     workforceAdministration,
     platformAdministrationProvisioning,
-    close: () => database.close(),
+    close: async () => { await recoveryMaintenance.close(); await database.close(); },
   };
 }
 

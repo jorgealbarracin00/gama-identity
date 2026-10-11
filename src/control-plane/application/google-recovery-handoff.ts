@@ -45,6 +45,26 @@ export class GoogleRecoveryHandoff {
   private async audit(actor: string, eventType: string, subject: string) {
     await this.plane.appendAudit({id: randomUUID(), eventType, actorReference: `human-identity:${actor}`, subjectReference: subject, eventData: {}, occurredAt: this.clock.now()});
   }
+  /** Erase expired transient PKCE material without deleting cases, receipts or audit history. */
+  async expireAbandoned(limit = 100): Promise<{ enabled: boolean; expired: number }> {
+    // Deployment does not grant maintenance authority to write production metadata.
+    if (!this.management.executionEnabled) return { enabled: false, expired: 0 };
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500)
+      fail("INVALID_REQUEST", "Handoff cleanup must use a bounded batch.", 400);
+    return this.db.withIdentityManagementTransaction(async () => {
+      const rows = await this.db.query<{ id: string; actor_id: string }>(
+        `SELECT id,actor_id FROM identity_management_google_handoffs
+         WHERE expires_at <= $1 AND (state IN ('awaiting_callback','processing') OR code_verifier IS NOT NULL)
+         ORDER BY expires_at,id LIMIT $2 FOR UPDATE SKIP LOCKED`, [this.clock.now(), limit]);
+      for (const row of rows.rows) {
+        await this.db.query(
+          `UPDATE identity_management_google_handoffs SET code_verifier=NULL,
+           state=CASE WHEN state IN ('awaiting_callback','processing') THEN 'failed' ELSE state END WHERE id=$1`, [row.id]);
+        await this.audit(row.actor_id, "recovery.google-handoff.expired", row.id);
+      }
+      return { enabled: true, expired: rows.rows.length };
+    });
+  }
   async start(adminToken: SessionId, input: {caseId: string; targetSession: string; kind?:"recovery"|"compensation"|undefined}) {
     const admin = await this.owner(adminToken); await this.principals.platform(admin.humanIdentityId.value); this.gate();
     return this.db.withIdentityManagementTransaction(async () => {
@@ -56,9 +76,9 @@ export class GoogleRecoveryHandoff {
       if (!c || c.actor_human_identity_id !== current.humanIdentityId.value) fail("RECOVERY_NOT_FOUND", "Recovery case not found.", 404);
       if (c.state !== "awaiting_proof" || c.expires_at <= now || target.humanIdentityId.value !== c.target_human_identity_id || target.authenticatedAt < c.created_at) fail("CONTROL_INVALID", "Freshly authenticate the selected primary after preparing this case.");
       const state = randomBytes(32).toString("base64url"), verifier = randomBytes(32).toString("base64url"), id = randomUUID(), expires = new Date(Math.min(now.getTime()+300000,c.expires_at.getTime()));
-      await this.db.query("UPDATE identity_management_google_handoffs SET state='cancelled',code_verifier=NULL WHERE case_id=$1 AND case_kind=$2 AND state='awaiting_callback'", [input.caseId,kind]);
+      await this.db.query("UPDATE identity_management_google_handoffs SET state='cancelled',code_verifier=NULL WHERE case_id=$1 AND case_kind=$2 AND state IN ('awaiting_callback','processing')", [input.caseId,kind]);
       await this.db.query("INSERT INTO identity_management_google_handoffs(id,case_id,actor_id,target_id,admin_session_hash,target_session_hash,state_digest,code_verifier,state,created_at,expires_at,case_kind,recovery_case_id,compensation_case_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'awaiting_callback',$9,$10,$11,$12,$13)", [id,input.caseId,current.humanIdentityId.value,target.humanIdentityId.value,digest(current.id.value),digest(target.id.value),hash(state),verifier,now,expires,kind,kind === "recovery" ? input.caseId : null,kind === "compensation" ? input.caseId : null]);
-      const url = new URL("https://accounts.google.com/o/oauth2/v2/auth"); url.search = new URLSearchParams({client_id:this.config!.clientId,redirect_uri:this.config!.redirectUri,response_type:"code",scope:"openid email",nonce:c.nonce,state,code_challenge:createHash("sha256").update(verifier).digest("base64url"),code_challenge_method:"S256",prompt:"select_account",max_age:"0"}).toString();
+      const url = new URL("https://accounts.google.com/o/oauth2/v2/auth"); url.search = new URLSearchParams({client_id:this.config!.clientId,redirect_uri:this.config!.redirectUri,response_type:"code",scope:"openid email",nonce:c.nonce,state,code_challenge:createHash("sha256").update(verifier).digest("base64url"),code_challenge_method:"S256",prompt:"select_account",max_age:"0",claims:JSON.stringify({id_token:{auth_time:{essential:true}}})}).toString();
       await this.audit(current.humanIdentityId.value,"recovery.google-handoff.started",id);
       return {handoffId:id,caseId:input.caseId,authorizationURL:url.toString(),callbackScheme:"gamaconsole",expiresAt:expires.toISOString()};
     });
@@ -68,6 +88,26 @@ export class GoogleRecoveryHandoff {
     const s = sessions.find(s => digest(s.id.value) === hashed);
     if (!s) fail("CONTROL_INVALID", "Verification session is unavailable.");
     return this.owner(s.id);
+  }
+  /** Cancel only this actor's handoff and unfinished case; never undo a completed operation. */
+  async cancel(adminToken: SessionId, id: string) {
+    const admin = await this.owner(adminToken); await this.principals.platform(admin.humanIdentityId.value); this.gate();
+    return this.db.withIdentityManagementTransaction(async () => {
+      const current = await this.owner(adminToken); await this.principals.platform(current.humanIdentityId.value);
+      const result = await this.db.query<HandoffRow>(
+        "SELECT * FROM identity_management_google_handoffs WHERE id=$1 AND actor_id=$2 FOR UPDATE", [id,current.humanIdentityId.value]);
+      const row = result.rows[0];
+      if (!row) fail("HANDOFF_NOT_FOUND", "Browser verification not found.", 404);
+      const table = row.case_kind === "compensation" ? "identity_recovery_compensations" : "identity_management_cases";
+      const changed = await this.db.query(
+        `UPDATE ${table} SET state='cancelled' WHERE id=$1 AND actor_human_identity_id=$2 AND state IN ('awaiting_proof','verified') RETURNING id`, [row.case_id,current.humanIdentityId.value]);
+      if (changed.rows.length) {
+        await this.db.query("UPDATE identity_management_google_handoffs SET state='cancelled',code_verifier=NULL WHERE case_id=$1 AND case_kind=$2 AND actor_id=$3 AND state IN ('awaiting_callback','processing','verified')",[row.case_id,row.case_kind,current.humanIdentityId.value]);
+        await this.audit(current.humanIdentityId.value,"recovery.google-handoff.cancelled",row.id);
+        row.state = "cancelled";
+      }
+      return {handoffId:row.id,caseId:row.case_id,state:row.state,expiresAt:row.expires_at.toISOString()};
+    });
   }
   async callback(input: {state:string;code?:string|undefined;error?:string|undefined}) {
     this.gate();
@@ -83,13 +123,16 @@ export class GoogleRecoveryHandoff {
       const admin = await this.referencedSession(row.actor_id,row.admin_session_hash); await this.principals.platform(admin.humanIdentityId.value);
       const target = await this.referencedSession(row.target_id,row.target_session_hash);
       const identityToken = await this.exchanger!.exchange({authorizationCode:input.code,codeVerifier:row.code_verifier});
-      if (row.case_kind === "compensation") await this.management.proveCompensation(admin.id,{caseId:row.case_id,targetSession:target.id.value,identityToken});
-      else await this.management.proveNativeRecovery(admin.id,{caseId:row.case_id,targetSession:target.id.value,identityToken});
+      if (row.case_kind === "compensation") await this.management.proveCompensation(admin.id,{caseId:row.case_id,targetSession:target.id.value,identityToken},row.id);
+      else await this.management.proveNativeRecovery(admin.id,{caseId:row.case_id,targetSession:target.id.value,identityToken},row.id);
       state = "verified";
     } catch { state = "failed"; }
-    await this.db.withIdentityManagementTransaction(async () => {
-      await this.db.query("UPDATE identity_management_google_handoffs SET state=$2,code_verifier=NULL WHERE id=$1 AND state='processing'", [row.id,state]);
+    state = await this.db.withIdentityManagementTransaction(async () => {
+      const current = await this.db.query<{state:string}>("SELECT state FROM identity_management_google_handoffs WHERE id=$1 FOR UPDATE",[row.id]);
+      if (current.rows[0]?.state !== "processing") return current.rows[0]?.state ?? "failed";
+      await this.db.query("UPDATE identity_management_google_handoffs SET state=$2,code_verifier=NULL WHERE id=$1", [row.id,state]);
       await this.audit(row.actor_id,state === "verified" ? "recovery.google-handoff.verified" : "recovery.google-handoff.failed",row.id);
+      return state;
     });
     return {handoffId:row.id,state};
   }
