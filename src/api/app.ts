@@ -13,6 +13,7 @@ import {
   type IdentityServices,
 } from "./services.js";
 import { administrationRoutes } from "./administration-routes.js";
+import { consoleControlCentreRoutes } from "./console-control-centre-routes.js";
 
 export function buildApp(
   services: IdentityServices = buildIdentityServices(),
@@ -30,6 +31,7 @@ export function buildApp(
   app.register(identityRoutes(services));
   app.register(controlPlaneRoutes(services, controlPlane));
   app.register(administrationRoutes(services));
+  app.register(consoleControlCentreRoutes(services));
 
   return app;
 }

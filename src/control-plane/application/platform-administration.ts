@@ -68,7 +68,7 @@ export interface PlatformTeamProductAccessProjection extends TenantProductProjec
 export interface PlatformTeamMemberProjection {
   readonly tenantId: string;
   readonly humanIdentityId: string;
-  readonly displayName: null;
+  readonly displayName: string | null;
   readonly email: string | null;
   readonly humanIdentityStatus: "active" | "suspended" | "retired" | null;
   readonly signInMethods: readonly string[];
@@ -91,6 +91,7 @@ export class PlatformAdministration {
     private readonly clock: Clock,
     private readonly atomically: AtomicExecutor = async (work) => work(),
     private readonly tenantIdGenerator: TenantIdGenerator = randomUUID,
+    private readonly preferredName?: (id: string) => Promise<string | null>,
   ) {}
 
   async listTenants(actorHumanIdentityId: string): Promise<readonly Tenant[]> {
@@ -366,7 +367,7 @@ export class PlatformAdministration {
     return {
       tenantId: membership.tenantId,
       humanIdentityId: membership.humanIdentityId,
-      displayName: null,
+      displayName: await this.preferredName?.(membership.humanIdentityId) ?? null,
       email: resolvedIdentity?.email ?? credential?.email.value ?? null,
       humanIdentityStatus: identity?.status ?? null,
       signInMethods: resolvedIdentity?.signInMethods ?? [],

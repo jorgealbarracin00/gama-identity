@@ -126,7 +126,7 @@ describe(
       const result = await database.query(
         "SELECT version FROM schema_migrations ORDER BY version",
       );
-      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012"]);
+      assert.deepEqual(result.rows.map((row) => row.version), ["001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013"]);
     });
 
     it("persists encrypted Apple revocation retries and erases tokens after completion", async () => {

@@ -23,15 +23,14 @@ export class PostgresIdentityInspectionRepository implements IdentityInspectionR
       return { identities: [], duplicateGroups: groups.slice(0, 50), nextCursor: groups.length > 50 ? groups[49]!.email : null };
     }
     const values = input.mode === "details" ? [input.humanIdentityIds] : [input.cursor ?? "", input.query.trim().toLowerCase()];
-    // Canonical Human currently has no name column. Return null, never infer a
-    // name from email/provider subject. The search contract supports names when stored.
+    // Reuse the optional global profile; never infer a person's name from email.
     const predicate = input.mode === "details" ? "h.id = ANY($1::text[])" : `h.id > $1 AND (
-      strpos(lower(h.id), $2) > 0 OR EXISTS (
+      strpos(lower(h.id), $2) > 0 OR strpos(lower(coalesce(p.preferred_display_name,'')), $2) > 0 OR EXISTS (
         SELECT 1 FROM (${emailMetadata}) e WHERE e.human_identity_id = h.id AND strpos(lower(e.email), $2) > 0
       ))`;
     const result = await this.database.query<InspectedHuman>(`
-      WITH selected AS (SELECT h.id, h.status FROM human_identities h WHERE ${predicate} ORDER BY h.id LIMIT 51)
-      SELECT h.id AS "humanIdentityId", NULL::text AS "displayName", h.status,
+      WITH selected AS (SELECT h.id, h.status,p.preferred_display_name FROM human_identities h LEFT JOIN human_profiles p ON p.human_identity_id=h.id WHERE ${predicate} ORDER BY h.id LIMIT 51)
+      SELECT h.id AS "humanIdentityId", h.preferred_display_name AS "displayName", h.status,
         coalesce((SELECT json_agg(json_build_object('method', m.method, 'status', m.status, 'email', m.email, 'emailVerified', m.verified) ORDER BY m.method, m.email, m.status)
           FROM (
             SELECT 'email_password' AS method, status, normalized_email AS email, email_verified_at IS NOT NULL AS verified FROM credentials WHERE human_identity_id = h.id

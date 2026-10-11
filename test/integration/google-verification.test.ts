@@ -97,6 +97,13 @@ describe("PostgreSQL scoped verification and isolated recovery",{skip:!url,concu
     if(results[0]!.status==="fulfilled") {assert.equal(await owner(),scope.target);assert.equal((await db.query("SELECT count(*) FROM sessions WHERE human_identity_id=$1 AND status<>'revoked'",[scope.source])).rows[0]!.count,"0");}
     else {assert.equal(await owner(),scope.source);assert.equal(results[1]!.status,"fulfilled");}
   });
+  it("isolated transfer blocks newly recorded Human product participation",async()=>{
+    await prepare();await observe();const grant=await harness.grant(sessionId,"synthetic-approval",true);
+    await db.query("INSERT INTO registered_products(id,display_name,status) VALUES('participant-product','Participant Product','active')");
+    await db.query("INSERT INTO product_workloads(id,product_id,secret_hash,status) VALUES('participant-workload','participant-product','unused-fixture-hash','active')");
+    await db.query("INSERT INTO human_product_participations VALUES($1,'participant-product','participant-workload','active',now(),now())",[scope.source]);
+    await assert.rejects(harness.execute(sessionId,proof(),grant),/DEPENDENCIES_REQUIRE_REVIEW/);assert.equal(await owner(),scope.source);
+  });
   it("isolated transfer rejects wrong subject, caller and changed dependency review",async()=>{
     await prepare();await observe();const grant=await harness.grant(sessionId,"synthetic-approval",true);await assert.rejects(harness.execute(sessionId,proof("other-subject"),grant));await assert.rejects(harness.execute("not-a-session",proof(),grant));await db.query("INSERT INTO tenants(id,display_name,status) VALUES('changed-tenant','Changed','active')");await db.query("INSERT INTO tenant_memberships(tenant_id,human_identity_id,tenant_role,status,created_at,updated_at) VALUES('changed-tenant',$1,'staff','active',now(),now())",[scope.source]);await assert.rejects(harness.execute(sessionId,proof(),grant));assert.equal(await owner(),scope.source);
   });

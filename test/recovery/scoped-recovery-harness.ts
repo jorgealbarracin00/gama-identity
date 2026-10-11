@@ -55,6 +55,8 @@ export class TestOnlyScopedRecovery {
       const report=await this.runtime.services.administration.googleVerification!.administer(SessionId.from(sessionId),{mode:"inspect"});
       const duplicate=report.source;
       if(duplicate.status!=="active" || report.target.status!=="active" || duplicate.platformMembership || duplicate.tenantMemberships.length || duplicate.productAssociations.length || Object.values(duplicate.extras).some(v=>v!==0)) throw new Error("DEPENDENCIES_REQUIRE_REVIEW");
+      const participation=await this.db.query("SELECT 1 FROM human_product_participations WHERE human_identity_id=$1 LIMIT 1",[scope.source]);
+      if(participation.rowCount)throw new Error("DEPENDENCIES_REQUIRE_REVIEW");
       if(!report.target.authenticationMethods.some(m=>m.method==="apple"&&m.status==="active") || !report.target.authenticationMethods.some(m=>m.method==="email_password"&&m.status==="active")) throw new Error("PRIMARY_ACCESS_CHANGED");
       if(proof.provider.value!=="google" || proof.expiresAt<=this.clock.now()) throw new Error("PROOF_INVALID");
       await this.federated.lockHumanProvider(HumanIdentityId.from(scope.source),proof.provider);

@@ -1,4 +1,6 @@
 import { GoogleRecoveryVerification } from "../control-plane/application/google-recovery-verification.js";
+import { ConsoleControlCentre } from "../control-plane/application/console-control-centre.js";
+import { PostgresControlCentreRepository } from "../infrastructure/postgres/postgres-control-centre-repository.js";
 import { PostgresGoogleVerificationStore } from "../infrastructure/postgres/postgres-google-verification-store.js";
 import { IdentityExplorer, type IdentityInspectionRepository } from "../control-plane/application/identity-explorer.js";
 import { PostgresIdentityInspectionRepository } from "../infrastructure/postgres/postgres-identity-inspection-repository.js";
@@ -101,6 +103,7 @@ import type { ControlPlaneRepository } from "../control-plane/ports/control-plan
 import { SerialExecutor } from "../shared/serial-executor.js";
 
 export interface AdministrationServices {
+  readonly controlCentre?: ConsoleControlCentre;
   readonly platform: PlatformAdministration;
   readonly identityExplorer: IdentityExplorer;
   readonly googleVerification?: GoogleRecoveryVerification;
@@ -238,6 +241,7 @@ export async function buildRuntime(
     clock,
     new PostgresIdentityInspectionRepository(database),
     (work) => database.withTransaction(work),
+    async(id) => (await new PostgresControlCentreRepository(database).profile(id))?.preferredDisplayName ?? null,
   );
   const platformAdministrationProvisioning = new PlatformAdministrationProvisioning(
     controlPlaneRepository,
@@ -261,7 +265,11 @@ export async function buildRuntime(
       }),
       register: new TransactionalRegister(services.register, database),
       controlPlane,
-      administration: { ...administration, ...(googleVerification === undefined ? {} : { googleVerification }) },
+      administration: { ...administration, ...(googleVerification === undefined ? {} : { googleVerification }),
+        controlCentre: new ConsoleControlCentre(new PostgresControlCentreRepository(database),
+          new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,
+          identities,sessions,controlPlane,clock,work=>database.withTransaction(work),
+          [...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId),...runtimeConfig.IDENTITY_TRUSTED_APPS.map(app=>app.id)],googleVerification) },
     },
     databaseHealth: {
       async check() {
@@ -357,6 +365,7 @@ function composeAdministration(
   clock: Clock,
   inspection: IdentityInspectionRepository,
   atomically: <T>(work: () => Promise<T>) => Promise<T> = async (work) => work(),
+  preferredName?: (id: string) => Promise<string | null>,
 ): AdministrationServices {
   const principals = new AdministrationPrincipals(repository, identities, controlPlane);
   return {
@@ -369,6 +378,8 @@ function composeAdministration(
       credentials,
       clock,
       atomically,
+      undefined,
+      preferredName,
     ),
     tenantTeam: new TenantTeamAdministration(principals, workforceAdministration, repository),
   };
