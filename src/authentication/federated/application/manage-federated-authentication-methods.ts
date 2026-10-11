@@ -58,6 +58,12 @@ export interface FederatedLinkInput extends FederatedCredentialInput {
   readonly provider: string;
 }
 
+/** Scoped web linking may only add proof to an approved existing account. */
+export interface FederatedLinkPolicy {
+  readonly allowedPrincipalIds: ReadonlySet<string>;
+  readonly allowReconciliation: false;
+}
+
 export interface FederatedLinkResult {
   readonly outcome: "linked" | "already_linked" | "reconciled";
   readonly humanIdentityId: string;
@@ -82,7 +88,13 @@ export class ManageFederatedAuthenticationMethods {
     private readonly federatedIdentityIds: FederatedIdentityIdGenerator,
     private readonly clock: Clock,
     private readonly atomically: <T>(work: () => Promise<T>) => Promise<T>,
+    private readonly linkPolicy?: FederatedLinkPolicy,
   ) {}
+
+  async preflightLink(sessionId: SessionId): Promise<HumanIdentityId> {
+    return this.atomically(async () =>
+      (await this.authenticatedSession(sessionId, true)).humanIdentityId);
+  }
 
   async list(sessionId: SessionId): Promise<AuthenticationMethodsProjection> {
     return this.atomically(async () => {
@@ -91,10 +103,14 @@ export class ManageFederatedAuthenticationMethods {
     });
   }
 
-  async link(sessionId: SessionId, input: FederatedLinkInput): Promise<FederatedLinkResult> {
+  async link(
+    sessionId: SessionId,
+    input: FederatedLinkInput,
+    expectedHumanIdentityId?: HumanIdentityId,
+  ): Promise<FederatedLinkResult> {
     // Reject an unusable caller session before asking an external provider verifier
     // to do work. The session is checked again in the mutation transaction.
-    await this.atomically(() => this.authenticatedSession(sessionId));
+    await this.atomically(() => this.authenticatedSession(sessionId, true, expectedHumanIdentityId));
 
     let provider: FederatedIdentityProvider;
     try {
@@ -105,7 +121,7 @@ export class ManageFederatedAuthenticationMethods {
     const verified = await this.verifiers.verify(provider, input);
 
     try {
-      return await this.atomically(() => this.completeLink(sessionId, verified));
+      return await this.atomically(() => this.completeLink(sessionId, verified, expectedHumanIdentityId));
     } catch (error) {
       if (error instanceof FederatedIdentityHumanProviderConflictError) {
         throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_LINK_CONFLICT");
@@ -177,8 +193,9 @@ export class ManageFederatedAuthenticationMethods {
   private async completeLink(
     sessionId: SessionId,
     verified: VerifiedFederatedCredential,
+    expectedHumanIdentityId?: HumanIdentityId,
   ): Promise<FederatedLinkResult> {
-    const session = await this.authenticatedSession(sessionId);
+    const session = await this.authenticatedSession(sessionId, true, expectedHumanIdentityId);
     const targetHumanIdentityId = session.humanIdentityId;
     const consumed = await this.nonces.consume(
       verified.provider,
@@ -236,6 +253,10 @@ export class ManageFederatedAuthenticationMethods {
     }
 
     if (targetRelationship !== null) {
+      throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_LINK_CONFLICT");
+    }
+
+    if (this.linkPolicy?.allowReconciliation === false) {
       throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_LINK_CONFLICT");
     }
 
@@ -301,20 +322,37 @@ export class ManageFederatedAuthenticationMethods {
     );
   }
 
-  private async authenticatedSession(sessionId: SessionId): Promise<Session> {
-    const session = await this.sessions.findById(sessionId);
+  private async authenticatedSession(
+    sessionId: SessionId,
+    forLink = false,
+    expectedHumanIdentityId?: HumanIdentityId,
+  ): Promise<Session> {
+    const scopedLink = forLink && this.linkPolicy !== undefined;
+    const session = scopedLink
+      ? await this.sessions.findByIdForUpdate(sessionId)
+      : await this.sessions.findById(sessionId);
     if (session === null) throw new FederatedAuthenticationMethodError("SESSION_INVALID");
+    if (scopedLink && !this.linkPolicy!.allowedPrincipalIds.has(session.humanIdentityId.value)) {
+      throw new FederatedAuthenticationMethodError("IDENTITY_UNAVAILABLE");
+    }
+    if (expectedHumanIdentityId !== undefined && !session.humanIdentityId.equals(expectedHumanIdentityId)) {
+      throw new FederatedAuthenticationMethodError("SESSION_INVALID");
+    }
     if (session.status === "revoked") throw new FederatedAuthenticationMethodError("SESSION_REVOKED");
     if (!session.validate(this.clock)) {
-      await this.sessions.save(session);
+      if (!scopedLink) await this.sessions.save(session);
       throw new FederatedAuthenticationMethodError("SESSION_EXPIRED");
     }
     const humanIdentity = await this.humanIdentities.findById(session.humanIdentityId);
     if (humanIdentity?.status !== "active") {
       throw new FederatedAuthenticationMethodError("IDENTITY_UNAVAILABLE");
     }
-    session.touch(this.clock);
-    await this.sessions.save(session);
+    // Scoped linking preserves the caller's session and holds its row lock
+    // until the final mutation commits; it cannot overwrite a concurrent revoke.
+    if (!scopedLink) {
+      session.touch(this.clock);
+      await this.sessions.save(session);
+    }
     return session;
   }
 

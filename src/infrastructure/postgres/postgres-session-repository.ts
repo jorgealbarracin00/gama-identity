@@ -65,6 +65,14 @@ export class PostgresSessionRepository implements SessionRepository {
     return toSession(result.rows[0]);
   }
 
+  async findByIdForUpdate(id: SessionId): Promise<Session | null> {
+    const result = await this.database.query<SessionRow>(
+      `${selectSession} WHERE id = $1 FOR UPDATE`,
+      [id.value],
+    );
+    return toSession(result.rows[0]);
+  }
+
   async findByRenewalTokenHashForUpdate(hash: string): Promise<Session | null> {
     const result = await this.database.query<SessionRow>(
       `${selectSession} WHERE renewal_token_hash = $1 FOR UPDATE`,

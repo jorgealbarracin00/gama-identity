@@ -40,6 +40,9 @@ const googleWebCredentialSchema = z.object({
   nonce: z.string().min(32).max(256),
   codeVerifier: z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/u),
 }).strict();
+const googleWebLinkSchema = googleWebCredentialSchema.extend({
+  appId: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+}).strict();
 const sessionRenewalSchema = z.object({
   renewalToken: z.string().min(32).max(512),
 }).strict();
@@ -211,6 +214,33 @@ export function identityRoutes(
           );
         }
         throw translateFederatedAuthenticationError(error);
+      }
+    });
+
+    app.post("/authentication/federated/google/web/link", async (request, reply) => {
+      const credential = googleWebLinkSchema.safeParse(request.body);
+      if (!credential.success) {
+        throw new AppError("Invalid request body", "INVALID_REQUEST", 400);
+      }
+      const sessionId = bearerSessionId(request);
+      const linking = services.webAuthenticationApps?.get(credential.data.appId)?.googleLink;
+      if (linking === undefined) {
+        throw new AppError("Google web linking is unavailable", "GOOGLE_WEB_LINKING_UNAVAILABLE", 503);
+      }
+      try {
+        return reply.send(await linking.execute(sessionId, {
+          authorizationCode: credential.data.authorizationCode,
+          nonce: credential.data.nonce,
+          codeVerifier: credential.data.codeVerifier,
+        }));
+      } catch (error) {
+        if (error instanceof GoogleAuthorizationCodeExchangeError) {
+          if (error.code === "TOKEN_EXCHANGE_UNAVAILABLE") {
+            throw new AppError("Google web linking is temporarily unavailable", "GOOGLE_WEB_LINKING_UNAVAILABLE", 503);
+          }
+          throw new AppError("The Google authorization was not accepted", "GOOGLE_AUTHORIZATION_CODE_INVALID", 401);
+        }
+        throw translateAuthenticationMethodsError(error);
       }
     });
 

@@ -5,6 +5,8 @@ import type { HumanIdentityId } from "../../identity/domain/human-identity-id.js
 export interface SessionRepository {
   save(session: Session): Promise<void>;
   findById(id: SessionId): Promise<Session | null>;
+  /** Called inside a transaction when a scoped mutation must serialize with revocation. */
+  findByIdForUpdate(id: SessionId): Promise<Session | null>;
   findActiveById(id: SessionId): Promise<Session | null>;
   findByRenewalTokenHashForUpdate(hash: string): Promise<Session | null>;
   listByHumanIdentityId(humanIdentityId: HumanIdentityId): Promise<readonly Session[]>;

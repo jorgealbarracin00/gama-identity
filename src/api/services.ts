@@ -13,6 +13,7 @@ import {
 import { AuthenticateFederated } from "../authentication/federated/application/authenticate-federated.js";
 import { AuthenticateAppleWeb } from "../authentication/federated/application/authenticate-apple-web.js";
 import { AuthenticateGoogleWeb } from "../authentication/federated/application/authenticate-google-web.js";
+import { LinkGoogleWeb } from "../authentication/federated/application/link-google-web.js";
 import { ManageFederatedAuthenticationMethods } from "../authentication/federated/application/manage-federated-authentication-methods.js";
 import { ResolveFederatedIdentity } from "../authentication/federated/application/resolve-federated-identity.js";
 import {
@@ -108,7 +109,7 @@ export interface IdentityServices {
   readonly authenticateFederated: AuthenticateFederated;
   readonly authenticateAppleWeb?: AuthenticateAppleWeb;
   readonly authenticateGoogleWeb?: AuthenticateGoogleWeb;
-  readonly webAuthenticationApps?: ReadonlyMap<string, { apple?: AuthenticateAppleWeb; google?: AuthenticateGoogleWeb }>;
+  readonly webAuthenticationApps?: ReadonlyMap<string, RegisteredWebAuthentication>;
   readonly resolveFederatedIdentity: ResolveFederatedIdentity;
   readonly federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   readonly logout: Logout;
@@ -117,6 +118,12 @@ export interface IdentityServices {
   readonly emailPasswordSecurity: EmailPasswordSecurity;
   readonly controlPlane: ControlPlane;
   readonly administration: AdministrationServices;
+}
+
+export interface RegisteredWebAuthentication {
+  apple?: AuthenticateAppleWeb;
+  google?: AuthenticateGoogleWeb;
+  googleLink?: LinkGoogleWeb;
 }
 
 export interface DatabaseHealth {
@@ -363,7 +370,7 @@ function composeServices(
   authenticateFederated: AuthenticateFederated;
   authenticateAppleWeb?: AuthenticateAppleWeb;
   authenticateGoogleWeb?: AuthenticateGoogleWeb;
-  webAuthenticationApps?: ReadonlyMap<string, { apple?: AuthenticateAppleWeb; google?: AuthenticateGoogleWeb }>;
+  webAuthenticationApps?: ReadonlyMap<string, RegisteredWebAuthentication>;
   resolveFederatedIdentity: ResolveFederatedIdentity;
   federatedAuthenticationMethods: ManageFederatedAuthenticationMethods;
   logout: Logout;
@@ -454,9 +461,9 @@ function composeServices(
       new GoogleWebAuthorizationCodeExchanger(googleWebConfig),
       authenticateFederated,
     );
-  const webAuthenticationApps = new Map<string, { apple?: AuthenticateAppleWeb; google?: AuthenticateGoogleWeb }>();
+  const webAuthenticationApps = new Map<string, RegisteredWebAuthentication>();
   for (const registeredApp of runtimeConfig.IDENTITY_WEB_APPS) {
-    const registered: { apple?: AuthenticateAppleWeb; google?: AuthenticateGoogleWeb } = {};
+    const registered: RegisteredWebAuthentication = {};
     // Each exchange validates only its registered client audience while sharing
     // canonical Human resolution and durable provider nonce replay protection.
     if (registeredApp.apple !== undefined) {
@@ -478,6 +485,18 @@ function composeServices(
         registeredApp.allowedPrincipalIds === undefined ? undefined : new Set(registeredApp.allowedPrincipalIds),
       );
       registered.google = new AuthenticateGoogleWeb(new GoogleWebAuthorizationCodeExchanger(registeredApp.google), authentication);
+      // Enable only the reviewed CashCast preview operation. Other products,
+      // production registrations and global audiences retain existing behavior.
+      if (registeredApp.appId === "cashcast-preview" && registeredApp.purpose === "preview" &&
+          runtimeConfig.REPOSITORY_MODE === "postgres") {
+        const methods = new ManageFederatedAuthenticationMethods(
+          new FederatedIdentityTokenVerifiers([new GoogleIdentityTokenVerifier({ clientIds: [registeredApp.google.clientId] })]),
+          federatedIdentities, federatedNonces, identities, credentials, sessions,
+          controlPlaneRepository, new UuidFederatedIdentityIdGenerator(), clock, atomically,
+          { allowedPrincipalIds: new Set(registeredApp.allowedPrincipalIds), allowReconciliation: false },
+        );
+        registered.googleLink = new LinkGoogleWeb(new GoogleWebAuthorizationCodeExchanger(registeredApp.google), methods);
+      }
     }
     webAuthenticationApps.set(registeredApp.appId, registered);
   }

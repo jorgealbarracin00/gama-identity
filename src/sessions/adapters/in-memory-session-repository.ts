@@ -14,6 +14,11 @@ export class InMemorySessionRepository implements SessionRepository {
     return this.sessions.get(id.value)?.copy() ?? null;
   }
 
+  async findByIdForUpdate(id: SessionId): Promise<Session | null> {
+    // The memory runtime supplies the existing serial transaction runner.
+    return this.findById(id);
+  }
+
   async findActiveById(id: SessionId): Promise<Session | null> {
     const session = await this.findById(id);
     return session?.status === "active" ? session : null;
