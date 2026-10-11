@@ -5,7 +5,7 @@ import {readFile,writeFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {PostgresDatabase} from '../src/infrastructure/postgres/database.js';
 import {syntheticManagementEnabled} from '../src/control-plane/application/identity-management.js';
-import {buildRuntime} from '../src/api/services.js';
+import {buildRuntime,type ApplicationRuntime} from '../src/api/services.js';
 import {buildApp} from '../src/api/app.js';
 import {loadConfig} from '../src/config/env.js';
 const url=process.env.POSTGRES_CODE_ROLLBACK_DATABASE_URL;
@@ -27,9 +27,11 @@ try {
  const previousApp=await import(pathToFileURL(`${baseline}/src/api/app.ts`).href);
  const results=[];
  for(const [revision,makeRuntime,configLoader,makeApp] of [['1c8655dc24bce684bddd1b1dbd5e22a6788fc863',previous.buildRuntime,oldConfig.loadConfig,previousApp.buildApp],['reviewed-candidate',buildRuntime,loadConfig,buildApp]] as const){
-  const runtime=await makeRuntime(configLoader({NODE_ENV:'production',REPOSITORY_MODE:'postgres',DATABASE_URL:url,LOG_LEVEL:'silent',DATABASE_SSL_REQUIRED:'false'}));
+  const runtime:ApplicationRuntime=await makeRuntime(configLoader({NODE_ENV:'production',REPOSITORY_MODE:'postgres',DATABASE_URL:url,LOG_LEVEL:'silent',DATABASE_SSL_REQUIRED:'false'}));
   const app=makeApp(runtime.services,runtime.databaseHealth);
   try {
+   assert.ok(runtime.services.administration.identityManagement);
+   assert.ok(runtime.services.administration.googleRecoveryHandoff);
    assert.equal(runtime.services.administration.identityManagement.executionEnabled,false);
    if(revision==='reviewed-candidate')assert.deepEqual(await runtime.services.administration.googleRecoveryHandoff.expireAbandoned(),{enabled:false,expired:0});
    const health=await app.inject({method:'GET',url:'/health'});assert.equal(health.statusCode,200);assert.equal(health.json().database.status,'connected');
@@ -41,7 +43,7 @@ try {
  const migrations=(await db.query('SELECT version,checksum FROM schema_migrations ORDER BY version')).rows;assert.equal(migrations.length,16);
  for(const migration of migrations){
   const {readdir}=await import('node:fs/promises');const file=(await readdir('migrations')).find(file=>file.startsWith(migration.version+'_'))!;
-  const current=await readFile(`migrations/${file}`),old=await readFile(`${baseline}/migrations/${file}`);assert.deepEqual(current,old);assert.equal(createHash('sha256').update(current).digest('hex'),migration.checksum);
+  const current:Buffer=await readFile(`migrations/${file}`),old:Buffer=await readFile(`${baseline}/migrations/${file}`);assert.deepEqual(current,old);assert.equal(createHash('sha256').update(current).digest('hex'),migration.checksum);
  }
  await writeFile(process.argv[2]!,JSON.stringify({timestamp:new Date().toISOString(),environment:'isolated synthetic PostgreSQL18',productionActions:false,mode:'production-config logic against guarded synthetic local database',results,migrations,protectedTableFingerprints:before,newMigrations:0,destructiveMigrations:false,codeRollbackCompatible:true,ownershipRollbackGuaranteed:false},null,2)+'\n',{mode:0o600});
  console.log(JSON.stringify({codeRollbackCompatible:true,newMigrations:0,protectedProjections:16}));
