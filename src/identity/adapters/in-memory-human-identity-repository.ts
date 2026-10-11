@@ -15,6 +15,10 @@ export class InMemoryHumanIdentityRepository
     return this.identities.get(id.value)?.copy() ?? null;
   }
 
+  listForInspection(): readonly HumanIdentity[] {
+    return [...this.identities.values()].map((identity) => identity.copy());
+  }
+
   async remove(id: HumanIdentityId): Promise<void> {
     this.identities.delete(id.value);
   }

@@ -9,6 +9,12 @@ import { SessionId } from "../sessions/domain/session-id.js";
 import { AppError } from "../shared/errors.js";
 import type { IdentityServices } from "./services.js";
 
+const inspectionRequest = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("search"), query: z.string().trim().min(1).max(320), cursor: z.string().max(320).optional() }).strict(),
+  z.object({ mode: z.literal("duplicates"), cursor: z.string().max(320).optional() }).strict(),
+  z.object({ mode: z.literal("details"), humanIdentityIds: z.array(z.string().min(1).max(200)).min(1).max(2) }).strict(),
+]);
+
 const tenantPath = z.object({ tenantId: z.string().min(1) });
 const tenantProductPath = tenantPath.extend({ productId: z.string().min(1) });
 const memberPath = tenantPath.extend({ humanIdentityId: z.string().min(1) });
@@ -37,6 +43,15 @@ const addTeamMember = z.union([
 
 export function administrationRoutes(services: IdentityServices): FastifyPluginAsync {
   return async (app) => {
+    // POST keeps personal search text out of request URLs and normal access logs.
+    // Inspection has no domain writes; its only write is an accountable audit event.
+    app.post("/administration/platform/identities/inspect", async (request, reply) => {
+      const actor = await authenticatedHumanIdentity(services, request);
+      const input = parse(inspectionRequest, request.body);
+      reply.header("Cache-Control", "no-store");
+      return reply.send(await administer(() => services.administration.identityExplorer.inspect(actor, input)));
+    });
+
     app.get("/administration/platform/tenants", async (request, reply) => {
       const actor = await authenticatedHumanIdentity(services, request);
       return reply.send(await administer(() => services.administration.platform.listTenants(actor)));

@@ -1,3 +1,6 @@
+import { IdentityExplorer, type IdentityInspectionRepository } from "../control-plane/application/identity-explorer.js";
+import { PostgresIdentityInspectionRepository } from "../infrastructure/postgres/postgres-identity-inspection-repository.js";
+import { MemoryIdentityInspectionRepository } from "../control-plane/adapters/memory-identity-inspection-repository.js";
 import { ProductAppleRevocation } from "../authentication/federated/application/product-apple-revocation.js";
 import { NativeProductAppleTokens } from "../authentication/federated/adapters/product-apple-tokens.js";
 import { PostgresAppleRevocationStore } from "../infrastructure/postgres/postgres-apple-revocation-store.js";
@@ -97,6 +100,7 @@ import { SerialExecutor } from "../shared/serial-executor.js";
 
 export interface AdministrationServices {
   readonly platform: PlatformAdministration;
+  readonly identityExplorer: IdentityExplorer;
   readonly tenantTeam: TenantTeamAdministration;
 }
 
@@ -216,6 +220,7 @@ export async function buildRuntime(
     controlPlane,
     workforceAdministration,
     clock,
+    new PostgresIdentityInspectionRepository(database),
     (work) => database.withTransaction(work),
   );
   const platformAdministrationProvisioning = new PlatformAdministrationProvisioning(
@@ -305,6 +310,7 @@ function buildMemoryRuntime(runtimeConfig: Config = config): ApplicationRuntime 
     controlPlane,
     workforceAdministration,
     clock,
+    new MemoryIdentityInspectionRepository(identities, credentials, federatedIdentities),
   );
   const platformAdministrationProvisioning = new PlatformAdministrationProvisioning(
     controlPlaneRepository,
@@ -333,10 +339,12 @@ function composeAdministration(
   controlPlane: ControlPlane,
   workforceAdministration: WorkforceAdministration,
   clock: Clock,
+  inspection: IdentityInspectionRepository,
   atomically: <T>(work: () => Promise<T>) => Promise<T> = async (work) => work(),
 ): AdministrationServices {
   const principals = new AdministrationPrincipals(repository, identities, controlPlane);
   return {
+    identityExplorer: new IdentityExplorer(principals, inspection, repository, clock),
     platform: new PlatformAdministration(
       principals,
       workforceAdministration,

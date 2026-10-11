@@ -1,3 +1,5 @@
+import { IdentityExplorer } from "../../src/control-plane/application/identity-explorer.js";
+import { MemoryIdentityInspectionRepository } from "../../src/control-plane/adapters/memory-identity-inspection-repository.js";
 import { createHash } from "node:crypto";
 
 import type { PasswordHasher, PasswordVerifier } from "../../src/authentication/credentials/ports/password-operations.js";
@@ -307,6 +309,7 @@ export function buildTestServices(): {
   const principals = new AdministrationPrincipals(controlPlaneRepository, identities, controlPlane);
   let tenantSequence = 0;
   const administration = {
+    identityExplorer: new IdentityExplorer(principals, new MemoryIdentityInspectionRepository(identities, credentials, federatedIdentities), controlPlaneRepository, clock),
     platform: new PlatformAdministration(
       principals,
       workforceAdministration,

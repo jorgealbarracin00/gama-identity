@@ -1,3 +1,4 @@
+import { buildApp } from "../../src/api/app.js";
 import { randomUUID } from "node:crypto";
 import { PostgresAppleRevocationStore } from "../../src/infrastructure/postgres/postgres-apple-revocation-store.js";
 import assert from "node:assert/strict";
@@ -72,6 +73,51 @@ describe(
 
     after(async () => {
       await database.close();
+    });
+
+    it("inspects safe metadata, global duplicates and actual associations through the authenticated endpoint", async () => {
+      const runtime = await buildRuntime(loadConfig({ REPOSITORY_MODE: "postgres", DATABASE_URL: testDatabaseUrl!, LOG_LEVEL: "silent" }));
+      try {
+        const admin = await runtime.services.register.execute({ email: "explorer-admin@example.com", password: "strong-correct-password" });
+        await database.query("UPDATE credentials SET email_verified_at = now() WHERE human_identity_id = $1", [admin.humanIdentityId]);
+        await runtime.platformAdministrationProvisioning.bootstrapAdministrator(admin.humanIdentityId, "test-operator");
+        const human = await runtime.services.register.execute({ email: "shared@example.com", password: "strong-correct-password" });
+        const providerHuman = "explorer-provider-human";
+        await database.query("INSERT INTO human_identities (id,status,created_at,updated_at) VALUES ($1,'suspended',now(),now())", [providerHuman]);
+        await database.query(`INSERT INTO federated_identities
+          (id,human_identity_id,provider,provider_subject,provider_email,provider_email_verified,provider_email_private,status,created_at,updated_at)
+          VALUES ('explorer-provider',$1,'apple','secret-provider-subject','SHARED@example.com',true,false,'disabled',now(),now())`, [providerHuman]);
+        await database.query("INSERT INTO tenants (id,display_name,status) VALUES ('explorer-tenant','Explorer Test Business','active')");
+        await database.query("INSERT INTO registered_products (id,display_name,status) VALUES ('explorer-granted','Granted Product','active'),('explorer-unassigned','Unassigned Product','active')");
+        await database.query("INSERT INTO product_participations (tenant_id,product_id,status) VALUES ('explorer-tenant','explorer-granted','suspended'),('explorer-tenant','explorer-unassigned','active')");
+        await database.query("INSERT INTO tenant_memberships (tenant_id,human_identity_id,status,tenant_role,created_at,updated_at) VALUES ('explorer-tenant',$1,'suspended','staff',now(),now())", [human.humanIdentityId]);
+        await database.query("INSERT INTO product_entitlements (tenant_id,product_id,human_identity_id,status) VALUES ('explorer-tenant','explorer-granted',$1,'retired')", [human.humanIdentityId]);
+        const app = buildApp(runtime.services);
+        try {
+          const headers = { authorization: `Bearer ${admin.session.sessionId}` };
+          const post = (payload: object) => app.inject({ method: "POST", url: "/administration/platform/identities/inspect", headers, payload });
+          const duplicates = await post({ mode: "duplicates" });
+          assert.equal(duplicates.statusCode, 200);
+          assert.deepEqual(new Set(duplicates.json().duplicateGroups[0].humanIdentityIds), new Set([human.humanIdentityId, providerHuman]));
+          const search = await post({ mode: "search", query: "SHARED@example.com" });
+          assert.equal(search.statusCode, 200); assert.equal(search.json().identities.length, 2);
+          const detail = await post({ mode: "details", humanIdentityIds: [human.humanIdentityId, providerHuman] });
+          assert.equal(detail.statusCode, 200); assert.equal(detail.json().identities.length, 2);
+          const provider = detail.json().identities.find((h: any) => h.humanIdentityId === providerHuman);
+          assert.equal(provider.status, "suspended"); assert.equal(provider.authenticationMethods[0].status, "disabled");
+          assert.equal(provider.authenticationMethods[0].emailVerified, true);
+          const associations = detail.json().identities.find((h: any) => h.humanIdentityId === human.humanIdentityId).productAssociations;
+          assert.equal(associations.length, 1); assert.equal(associations[0].productId, "explorer-granted");
+          assert.equal(associations[0].entitlementStatus, "retired"); assert.equal(associations[0].participationStatus, "suspended");
+          assert.equal(associations[0].membershipStatus, "suspended");
+          assert.ok(!/secret-provider|password_hash|passwordHash|provider_subject|providerSubject/.test(detail.body));
+          assert.equal((await post({ mode: "search", query: "%' OR 1=1 --" })).json().identities.length, 0);
+          const audits = await database.query("SELECT event_data FROM platform_audit_events WHERE event_type = 'platform.identity.inspected'");
+          assert.equal(audits.rows.length, 4); assert.ok(!JSON.stringify(audits.rows).includes("shared@example.com"));
+          assert.equal((await database.query("SELECT count(*) FROM human_identities")).rows[0]!.count, "3");
+          assert.equal((await database.query("SELECT count(*) FROM federated_identities")).rows[0]!.count, "1");
+        } finally { await app.close(); }
+      } finally { await runtime.close(); }
     });
 
     it("runs versioned migrations repeatedly without changing applied state", async () => {
