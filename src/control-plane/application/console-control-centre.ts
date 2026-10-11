@@ -10,13 +10,14 @@ import { SessionId } from "../../sessions/domain/session-id.js";
 import { AppError } from "../../shared/errors.js";
 import type { GoogleRecoveryVerification } from "./google-recovery-verification.js";
 
-export interface HumanDirectoryQuery { query?: string|undefined; status?: string|undefined; provider?: string|undefined; productId?: string|undefined; sort?: "name"|"created"|"activity"|"id"|undefined; cursor?: string|undefined }
+export interface HumanDirectoryQuery { filter?: "all"|"production"|"test"|"duplicates"|"needs_review"|"inactive"|"suspended"|"retired"|undefined; query?: string|undefined; status?: string|undefined; provider?: string|undefined; productId?: string|undefined; sort?: "name"|"created"|"activity"|"id"|undefined; cursor?: string|undefined }
 export interface ConsoleHuman {
   humanIdentityId: string; preferredDisplayName: string|null; displayName: string; displayNameSource: string;
   email: string|null; status: string; createdAt: string; lastActivityAt: string|null;
   authenticationMethods: {method:string;status:string;email:string|null;emailVerified:boolean|null}[];
   memberships: {tenantId:string;tenantName:string;role:string;status:string}[];
   platformRole: string|null;
+  purpose?: string; activity?: string; potentialTestCandidate?: boolean; classificationRevision?: number;
   products: {productId:string;displayName:string;participationStatus:string|null;entitlements:{tenantId:string;status:string}[]}[];
 }
 export interface HumanDirectoryRow extends ConsoleHuman { sortKey:string }
@@ -25,7 +26,7 @@ export interface ControlCentreRepository {
   insertProduct(id:string,displayName:string):Promise<boolean>;
   humans(input:HumanDirectoryQuery, after:{key:string;id:string}|null):Promise<HumanDirectoryRow[]>;
   human(id:string):Promise<ConsoleHuman|null>;
-  summary():Promise<{humans:number;products:number;businesses:number;knownParticipants:number;duplicateEmailGroups:number;pendingRecoveryRequests:number;pendingVerificationCases:number}>;
+  summary():Promise<{humans:number;products:number;businesses:number;knownParticipants:number;duplicateEmailGroups:number;pendingRecoveryRequests:number;pendingVerificationCases:number;testIdentities?:number;testCandidates?:number}>;
   products():Promise<{id:string;displayName:string;status:string;participants:number;entitledHumans:number;businesses:number;workloads:number}[]>;
   activity(input:{eventType?:string|undefined;cursor?:string|undefined},after:{key:string;id:string}|null):Promise<{id:string;eventType:string;actorReference:string;subjectReference:string;productId:string|null;tenantId:string|null;occurredAt:string}[]>;
   profile(id:string):Promise<{humanIdentityId:string;preferredDisplayName:string|null;revision:number}>;
@@ -37,7 +38,7 @@ export interface ControlCentreRepository {
   requestForUpdate(id:string):Promise<RecoveryRequest|null>;
 }
 
-export function directoryFingerprint(input:HumanDirectoryQuery) { return createHash("sha256").update(JSON.stringify([input.query?.trim().toLowerCase()??"",input.status??"",input.provider??"",input.productId??"",input.sort??"created"])).digest("hex"); }
+export function directoryFingerprint(input:HumanDirectoryQuery) { return createHash("sha256").update(JSON.stringify([input.query?.trim().toLowerCase()??"",input.status??"",input.provider??"",input.productId??"",input.sort??"created",input.filter??"all"])).digest("hex"); }
 export function pageCursor(scope:string,key:string,id:string) { return Buffer.from(JSON.stringify({scope,key,id}),"utf8").toString("base64url"); }
 export function readCursor(value:string|undefined,scope:string) {
   if (!value) return null;
@@ -49,7 +50,7 @@ export function readCursor(value:string|undefined,scope:string) {
   }catch{throw new AppError("Refresh this list after changing its filters","INVALID_CURSOR",400);}
 }
 export function resolvedDisplayName(preferred:string|null,email:string|null,id:string) {
-  return preferred?.trim() ? {displayName:preferred.trim(),displayNameSource:"preferred"} : email ? {displayName:email,displayNameSource:"verified_email"} : {displayName:`Human ${id.slice(0,8)}`,displayNameSource:"identifier"};
+  return preferred?.trim() ? {displayName:preferred.trim(),displayNameSource:"preferred"} : email ? {displayName:email,displayNameSource:"verified_email"} : {displayName:"Name unavailable",displayNameSource:"identifier"};
 }
 
 /** Authenticated bounded administration projections; no domain lifecycle/ownership writer. */
@@ -95,6 +96,8 @@ export class ConsoleControlCentre {
     const actor=await this.admin(id),summary=await this.repository.summary();
     const recent=await this.repository.activity({},null);
     const issues=[];
+    if((summary.testCandidates??0)>0)issues.push({id:"test-candidates",title:"Development aliases awaiting review",detail:`${summary.testCandidates} Humans match the owner's development alias family. Purpose has not been confirmed.`,action:"Review classification",destination:"test_review"});
+    if((summary.testIdentities??0)>0)issues.push({id:"test-identities",title:"Confirmed test identities",detail:`${summary.testIdentities} Humans are explicitly classified as test. Dependencies and lifecycle eligibility require separate review.`,action:"Review test identities",destination:"test_identities"});
     if(summary.duplicateEmailGroups>0)issues.push({id:"possible-duplicates",title:"Possible duplicate identities",detail:`${summary.duplicateEmailGroups} repeated email groups need review. A shared email does not establish ownership.`,action:"Review identities",destination:"duplicates"});
     if(summary.pendingRecoveryRequests>0)issues.push({id:"pending-recovery",title:"Recovery reviews pending",detail:`${summary.pendingRecoveryRequests} requests require ownership verification and dependency review.`,action:"Review recovery",destination:"recovery"});
     if(summary.pendingVerificationCases>0)issues.push({id:"pending-verification",title:"Google verification pending",detail:`${summary.pendingVerificationCases} live observation cases require fresh ownership evidence.`,action:"Review verification",destination:"verification"});

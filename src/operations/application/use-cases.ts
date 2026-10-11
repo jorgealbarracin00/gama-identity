@@ -85,9 +85,11 @@ export class Login {
   constructor(
     private readonly authenticate: Authenticate,
     private readonly createSession: CreateSession,
+    private readonly atomically: <T>(work: () => Promise<T>) => Promise<T> = async work => work(),
   ) {}
 
   async execute(input: CredentialsInput): Promise<CreatedSession> {
+    return this.atomically(async () => {
     const result: AuthenticationResult = await this.authenticate.execute({
       email: input.email,
       plaintextPassword: input.password,
@@ -96,5 +98,6 @@ export class Login {
       throw new InvalidLoginError();
     }
     return this.createSession.execute(result.humanIdentityId);
+    });
   }
 }

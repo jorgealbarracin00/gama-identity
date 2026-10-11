@@ -15,7 +15,7 @@ const customer=await runtime.services.register.execute({email:'customer@fixture.
 await db.query('UPDATE credentials SET email_verified_at=now()');
 for(const [id,name] of [[admin.humanIdentityId,'Fixture Administrator'],[customer.humanIdentityId,'Fixture Customer']])await db.query('INSERT INTO human_profiles VALUES($1,$2,1,now())',[id,name]);
 const source='33333333-3333-4333-8333-333333333333';
-await db.query("INSERT INTO human_identities VALUES($1,'active',now(),now())",[source]);
+await db.query("INSERT INTO human_identities(id,status,created_at,updated_at) VALUES($1,'active',now(),now())",[source]);
 await db.query("INSERT INTO federated_identities(id,human_identity_id,provider,provider_subject,provider_email,provider_email_verified,status,created_at,updated_at) VALUES('ui-fixture-google',$1,'google','ui-fixture-secret-subject','customer@fixture.example',true,'active',now(),now())",[source]);
 await control.saveProduct({id:'fixture-product',displayName:'Fixture Product',status:'active'});
 await control.saveWorkload({id:'fixture-workload',productId:'fixture-product',secretHash:'unused-ui-fixture-hash',status:'active'});
@@ -24,6 +24,7 @@ await control.saveTenant({id:'fixture-business',displayName:'Fixture Business',s
 await control.saveParticipation({tenantId:'fixture-business',productId:'fixture-product',status:'active'});
 await control.saveMembership({tenantId:'fixture-business',humanIdentityId:admin.humanIdentityId,tenantRole:'owner',status:'active',createdAt:new Date(),updatedAt:new Date()});
 await control.saveEntitlement({tenantId:'fixture-business',productId:'fixture-product',humanIdentityId:admin.humanIdentityId,status:'active'});
+await db.query("INSERT INTO human_purposes(human_identity_id,purpose,reason,actor_human_identity_id,revision,updated_at) VALUES($1,'test','Trusted isolated UI fixture',$2,1,now())",[source,admin.humanIdentityId]);
 const app=buildApp(runtime.services,runtime.databaseHealth);
 await app.listen({host:'127.0.0.1',port:3119});
 console.log('Console UI fixture ready on loopback port3119');

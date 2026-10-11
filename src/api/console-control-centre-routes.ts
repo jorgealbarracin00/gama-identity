@@ -7,7 +7,7 @@ import type { IdentityServices } from "./services.js";
 const cursor=z.string().min(1).max(2048).optional();
 const identifier=z.string().trim().min(1).max(200);
 const pair=z.object({sourceHumanIdentityId:identifier,targetHumanIdentityId:identifier,provider:z.enum(['google','apple','email_password'])}).strict();
-const directory=z.object({query:z.string().trim().max(320).optional(),status:z.enum(['active','suspended','retired']).optional(),provider:z.enum(['google','apple','email_password']).optional(),productId:identifier.optional(),sort:z.enum(['name','created','activity','id']).optional(),cursor}).strict();
+const directory=z.object({filter:z.enum(["all","production","test","duplicates","needs_review","inactive","suspended","retired"]).optional(),query:z.string().trim().max(320).optional(),status:z.enum(['active','suspended','retired']).optional(),provider:z.enum(['google','apple','email_password']).optional(),productId:identifier.optional(),sort:z.enum(['name','created','activity','id']).optional(),cursor}).strict();
 function session(request:FastifyRequest) {const m=/^Bearer ([^\s]+)$/.exec(request.headers.authorization??'');if(!m?.[1])throw new AppError('Sign in to continue','SESSION_INVALID',401);return SessionId.from(m[1]);}
 function parse<T>(schema:z.ZodType<T>,value:unknown):T {const p=schema.safeParse(value);if(!p.success)throw new AppError('The request is invalid','INVALID_REQUEST',400);return p.data;}
 export function consoleControlCentreRoutes(services:IdentityServices):FastifyPluginAsync {return async(app)=>{

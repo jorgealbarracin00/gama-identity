@@ -1,3 +1,4 @@
+import type { HumanIdentityRepository } from '../../identity/ports/human-identity-repository.js';
 import type { HumanIdentityId } from "../../identity/domain/human-identity-id.js";
 import type { Clock } from "../../shared/clock.js";
 import { Session } from "../domain/session.js";
@@ -47,9 +48,11 @@ export class CreateSession {
     private readonly durationSeconds: number,
     private readonly renewalTokens: SessionRenewalTokenGenerator = new SecureSessionRenewalTokenGenerator(),
     private readonly renewalDurationSeconds = 2_592_000,
+    private readonly humans?: HumanIdentityRepository,
   ) {}
 
   async execute(humanIdentityId: HumanIdentityId, authenticatedAt?: Date): Promise<CreatedSession> {
+    if (this.humans && (await this.humans.findById(humanIdentityId))?.status !== "active") throw new SessionRenewalError("revoked");
     const renewalToken = this.renewalTokens.next();
     const session = Session.create(
       this.idGenerator,
@@ -117,11 +120,15 @@ export class ValidateSession {
   constructor(
     private readonly repository: SessionRepository,
     private readonly clock: Clock,
+    private readonly atomically: <T>(work: () => Promise<T>) => Promise<T> = async work => work(),
+    private readonly humans?: HumanIdentityRepository,
   ) {}
 
   async execute(id: SessionId): Promise<SessionValidationResult> {
-    const session = await this.repository.findById(id);
+    return this.atomically(async () => {
+    const session = await this.repository.findByIdForUpdate(id);
     if (session === null) return { outcome: "invalid" };
+    if (this.humans && (await this.humans.findById(session.humanIdentityId))?.status !== "active") return { outcome: "revoked" };
     if (session.status === "revoked") return { outcome: "revoked" };
     if (!session.validate(this.clock)) {
       await this.repository.save(session);
@@ -130,6 +137,7 @@ export class ValidateSession {
     session.touch(this.clock);
     await this.repository.save(session);
     return { outcome: "authenticated", ...metadata(session) };
+    });
   }
 }
 

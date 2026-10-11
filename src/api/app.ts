@@ -1,3 +1,4 @@
+import { identityManagementRoutes } from './identity-management-routes.js';
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { healthRoutes } from "../health/routes.js";
@@ -32,6 +33,7 @@ export function buildApp(
   app.register(controlPlaneRoutes(services, controlPlane));
   app.register(administrationRoutes(services));
   app.register(consoleControlCentreRoutes(services));
+  app.register(identityManagementRoutes(services));
 
   return app;
 }

@@ -1,0 +1,993 @@
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { ControlPlane } from "./control-plane.js";
+import type { Config } from "../../config/env.js";
+import { AppError } from "../../shared/errors.js";
+import type { Clock } from "../../shared/clock.js";
+import type { PostgresDatabase } from "../../infrastructure/postgres/database.js";
+import type { PostgresControlCentreRepository } from "../../infrastructure/postgres/postgres-control-centre-repository.js";
+import type { AdministrationPrincipals } from "./administration-principals.js";
+import type { ControlPlaneRepository } from "../ports/control-plane-repository.js";
+import type { HumanIdentityRepository } from "../../identity/ports/human-identity-repository.js";
+import { HumanIdentityId } from "../../identity/domain/human-identity-id.js";
+import type { SessionRepository } from "../../sessions/ports/session-repository.js";
+import { SessionId } from "../../sessions/domain/session-id.js";
+import type {
+  FederatedIdentityRepository,
+  FederatedAuthenticationNonceRepository,
+} from "../../authentication/federated/ports/federated-identity-repository.js";
+import { FederatedIdentityProvider } from "../../authentication/federated/domain/federated-identity.js";
+import type { FederatedIdentityTokenVerifiers } from "../../authentication/federated/application/token-verifier.js";
+
+export type Purpose = "production" | "test" | "unknown";
+export type LifecycleAction = "suspend" | "reactivate" | "retire";
+export const digest = (value: unknown) =>
+  createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function reject(code: string, message: string): never {
+  throw new AppError(message, code, 409);
+}
+/** Not a production feature flag. Activation requires a separately reviewed implementation. */
+export function syntheticManagementEnabled(
+  config: Pick<Config, "NODE_ENV" | "DATABASE_URL" | "REPOSITORY_MODE">,
+): boolean {
+  try {
+    const u = new URL(config.DATABASE_URL ?? "");
+    return (
+      config.NODE_ENV === "test" &&
+      config.REPOSITORY_MODE === "postgres" &&
+      ["127.0.0.1", "localhost"].includes(u.hostname) &&
+      /^\/[a-z0-9_]+_management_test$/.test(u.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+export function activityClassification(last: string | null, now: Date) {
+  // Session history has no completeness guarantee. Absence or an old observation proves neither inactivity nor abandonment.
+  return last !== null &&
+    Date.parse(last) <= now.getTime() &&
+    Date.parse(last) >= now.getTime() - 30 * 86400000
+    ? "recently_active"
+    : "unknown";
+}
+export function potentialTestAlias(email: string | null): boolean {
+  return /^jorgealbarracin\+[^@\s]+@gmail\.com$/i.test(email ?? "");
+}
+interface RecoveryCase {
+  id: string;
+  actor_human_identity_id: string;
+  source_human_identity_id: string;
+  target_human_identity_id: string;
+  provider: string;
+  nonce: string;
+  relationship_id: string | null;
+  state: string;
+  created_at: Date;
+  expires_at: Date;
+  proof_expires_at: Date | null;
+  review_digest: string | null;
+}
+
+export class IdentityManagement {
+  constructor(
+    private readonly db: PostgresDatabase,
+    private readonly centre: PostgresControlCentreRepository,
+    private readonly principals: AdministrationPrincipals,
+    private readonly plane: ControlPlaneRepository,
+    private readonly humans: HumanIdentityRepository,
+    private readonly sessions: SessionRepository,
+    private readonly federated: FederatedIdentityRepository,
+    private readonly nonces: FederatedAuthenticationNonceRepository,
+    private readonly verifiers: FederatedIdentityTokenVerifiers,
+    private readonly clock: Clock,
+    readonly executionEnabled: boolean,
+    private readonly controlPlane: ControlPlane,
+    private readonly requiredProducts: readonly string[] = [],
+  ) {}
+  private gate() {
+    if (!this.executionEnabled)
+      throw new AppError(
+        "Account changes remain disabled in this release",
+        "IDENTITY_MANAGEMENT_DISABLED",
+        403,
+      );
+  }
+  private async owner(token: SessionId, fresh = false) {
+    const s = await this.sessions.findById(token);
+    const now = this.clock.now();
+    if (
+      !s ||
+      s.status !== "active" ||
+      s.expiresAt <= now ||
+      (await this.humans.findById(s.humanIdentityId))?.status !== "active"
+    )
+      throw new AppError("Sign in to continue", "SESSION_INVALID", 401);
+    if (
+      fresh &&
+      (now.getTime() - s.authenticatedAt.getTime() < 0 ||
+        now.getTime() - s.authenticatedAt.getTime() > 300000)
+    )
+      throw new AppError(
+        "Fresh sign-in is required",
+        "REAUTHENTICATION_REQUIRED",
+        403,
+      );
+    return s;
+  }
+  private async admin(token: SessionId, fresh = false) {
+    const s = await this.owner(token, fresh);
+    return this.principals.platform(s.humanIdentityId.value);
+  }
+  private async audit(
+    actor: string,
+    type: string,
+    subject: string,
+    data: Record<string, string> = {},
+  ) {
+    await this.plane.appendAudit({
+      id: randomUUID(),
+      eventType: type,
+      actorReference: `human-identity:${actor}`,
+      subjectReference: subject,
+      eventData: data,
+      occurredAt: this.clock.now(),
+    });
+  }
+  private async metadata(id: string) {
+    const human = await this.centre.human(id);
+    if (!human) throw new AppError("Human not found", "HUMAN_NOT_FOUND", 404);
+    const r = await this.db.query<{
+      purpose: Purpose;
+      reason: string;
+      revision: number;
+    }>(
+      "SELECT purpose,reason,revision FROM human_purposes WHERE human_identity_id=$1",
+      [id],
+    );
+    return {
+      human,
+      purpose: r.rows[0]?.purpose ?? "unknown",
+      classificationReason: r.rows[0]?.reason ?? null,
+      classificationRevision: r.rows[0]?.revision ?? 0,
+      activity: activityClassification(human.lastActivityAt, this.clock.now()),
+      lifecycle: human.status,
+      potentialTestCandidate: human.authenticationMethods.some((m) =>
+        potentialTestAlias(m.email),
+      ),
+    };
+  }
+  private async assess(id: string, ignoreCase: string | null = null) {
+    const m = await this.metadata(id),
+      counts = await this.centre.dependencyCounts(id, this.clock.now());
+    const reports = await this.db.query<{
+      productId: string;
+      state: string;
+      counts: Record<string, number> | null;
+      observedAt: string | null;
+    }>(
+      `WITH products AS (SELECT id FROM registered_products UNION SELECT unnest($3::text[]) AS id) SELECT p.id AS "productId", CASE WHEN i.product_id IS NULL THEN 'not_supported' WHEN r.human_identity_id IS NULL OR r.inspector_revision<>i.revision OR r.expires_at<=$2 OR r.observed_at>$2 THEN 'not_verified' ELSE 'verified' END AS state,r.counts,r.observed_at::text AS "observedAt" FROM products p LEFT JOIN product_dependency_inspectors i ON i.product_id=p.id LEFT JOIN product_dependency_reports r ON r.product_id=p.id AND r.human_identity_id=$1 ORDER BY p.id`,
+      [id, this.clock.now(), this.requiredProducts],
+    );
+    // No product registry is also incomplete coverage, not evidence of an empty platform.
+    const unknown =
+      reports.rows.length === 0 ||
+      reports.rows.some((r) => r.state !== "verified");
+    const externalPresent = reports.rows.some(
+      (r) =>
+        r.state === "verified" &&
+        Object.values(r.counts ?? {}).some((n) => n > 0),
+    );
+    const protectedIdentity =
+      m.human.platformRole !== null ||
+      m.human.memberships.some((x) => x.role === "owner") ||
+      reports.rows.some(
+        (r) =>
+          r.state === "verified" &&
+          ((r.counts?.ownership ?? 0) > 0 || (r.counts?.retention ?? 0) > 0),
+      );
+    const pending = await this.db.query<{ count: number }>(
+      `SELECT ((SELECT count(*) FROM identity_management_cases WHERE (source_human_identity_id=$1 OR target_human_identity_id=$1) AND state IN ('awaiting_proof','verified') AND expires_at>$2 AND ($3::uuid IS NULL OR id<>$3))+(SELECT count(*) FROM identity_recovery_requests WHERE (source_human_identity_id=$1 OR target_human_identity_id=$1) AND state='review_required'))::int AS count`,
+      [id, this.clock.now(), ignoreCase],
+    );
+    const pendingRecoveryReferences = pending.rows[0]!.count;
+    const relationshipsPresent =
+      pendingRecoveryReferences > 0 ||
+      m.human.memberships.length > 0 ||
+      m.human.products.length > 0 ||
+      counts.provisioningReferences > 0 ||
+      counts.emailChallenges > 0 ||
+      counts.appleRevocationReferences > 0 ||
+      externalPresent;
+    const sessionRows = await this.db.query<{
+      reference: string;
+      status: string;
+      authenticatedAt: string;
+      expiresAt: string;
+      renewable: boolean;
+    }>(
+      `SELECT left(md5(id),12) AS reference,status,authenticated_at::text AS "authenticatedAt",expires_at::text AS "expiresAt",(status<>'revoked' AND renewal_expires_at>$2 AND renewal_token_hash IS NOT NULL) AS renewable FROM sessions WHERE human_identity_id=$1 ORDER BY created_at,id LIMIT 100`,
+      [id, this.clock.now()],
+    );
+    // Read-only opaque references are not bearer/session IDs. Count covers all sessions even when display is bounded.
+    const nonRevoked = await this.db.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM sessions WHERE human_identity_id=$1 AND status<>'revoked'",
+      [id],
+    );
+    const result = {
+      ...m,
+      counts,
+      nonRevokedSessionCount: nonRevoked.rows[0]!.count,
+      sessions: sessionRows.rows,
+      sessionDisplayTruncated: counts.totalSessions > 100,
+      products: reports.rows,
+      unknownCoverage: unknown,
+      protectedIdentity,
+      relationshipsPresent,
+      pendingRecoveryReferences,
+      outcome: protectedIdentity
+        ? "protected_identity"
+        : unknown
+          ? "assessment_incomplete"
+          : relationshipsPresent ||
+              counts.activeSessions > 0 ||
+              counts.renewableSessions > 0
+            ? "dependencies_present"
+            : "no_blocking_dependencies_found",
+      deletionAuthorization: false,
+      activityCoverage: "incomplete_session_history",
+      pendingAndExternalReferences:
+        counts.emailChallenges +
+        counts.appleRevocationReferences +
+        counts.provisioningReferences,
+    };
+    return {
+      ...result,
+      reviewDigest: digest({
+        ...result,
+        sessions: sessionRows.rows.map((s) => ({
+          reference: s.reference,
+          status: s.status,
+          authenticatedAt: s.authenticatedAt,
+          expiresAt: s.expiresAt,
+          renewable: s.renewable,
+        })),
+      }),
+    };
+  }
+  async inspect(token: SessionId, id: string) {
+    return this.db.withTransaction(async () => {
+      const a = await this.admin(token);
+      const assessment = await this.assess(id);
+      await this.audit(a.humanIdentityId, "human.management.inspected", id);
+      return {
+        ...assessment,
+        executionEnabled: this.executionEnabled,
+        permanentDeletionEnabled: false,
+      };
+    });
+  }
+  async classify(
+    token: SessionId,
+    input: {
+      humanIdentityId: string;
+      purpose: Purpose;
+      reason: string;
+      expectedRevision: number;
+      requestId: string;
+    },
+  ) {
+    await this.admin(token, true);
+    this.gate();
+    return this.db.withIdentityManagementTransaction(async () => {
+      const a = await this.admin(token, true);
+      const intent = digest(input);
+      const previous = await this.previous(
+        input.requestId,
+        a.humanIdentityId,
+        "classify",
+        intent,
+      );
+      if (previous) return previous;
+      const m = await this.metadata(input.humanIdentityId);
+      if (m.classificationRevision !== input.expectedRevision)
+        reject(
+          "CLASSIFICATION_CONFLICT",
+          "Classification changed. Reload before saving.",
+        );
+      await this.db.query(
+        `INSERT INTO human_purposes(human_identity_id,purpose,reason,actor_human_identity_id,revision,updated_at) VALUES($1,$2,$3,$4,1,$5) ON CONFLICT(human_identity_id) DO UPDATE SET purpose=EXCLUDED.purpose,reason=EXCLUDED.reason,actor_human_identity_id=EXCLUDED.actor_human_identity_id,revision=human_purposes.revision+1,updated_at=EXCLUDED.updated_at`,
+        [
+          input.humanIdentityId,
+          input.purpose,
+          input.reason,
+          a.humanIdentityId,
+          this.clock.now(),
+        ],
+      );
+      const result = {
+        humanIdentityId: input.humanIdentityId,
+        purpose: input.purpose,
+        revision: input.expectedRevision + 1,
+      };
+      await this.audit(
+        a.humanIdentityId,
+        "human.purpose.changed",
+        input.humanIdentityId,
+        { purpose: input.purpose, reason: input.reason },
+      );
+      await this.record(
+        input.requestId,
+        a.humanIdentityId,
+        "classify",
+        intent,
+        result,
+      );
+      return result;
+    });
+  }
+  private async previous(
+    id: string,
+    actor: string,
+    kind: string,
+    intent: string,
+  ) {
+    const r = await this.db.query<{
+      actor_human_identity_id: string;
+      kind: string;
+      intent_digest: string;
+      result: Record<string, unknown>;
+    }>(
+      "SELECT actor_human_identity_id,kind,intent_digest,result FROM identity_management_operations WHERE id=$1",
+      [id],
+    );
+    const x = r.rows[0];
+    if (!x) return null;
+    if (
+      x.actor_human_identity_id !== actor ||
+      x.kind !== kind ||
+      x.intent_digest !== intent
+    )
+      reject(
+        "IDEMPOTENCY_CONFLICT",
+        "Request identifier is already bound to a different operation.",
+      );
+    return x.result;
+  }
+  private async record(
+    id: string,
+    actor: string,
+    kind: string,
+    intent: string,
+    result: unknown,
+  ) {
+    await this.db.query(
+      "INSERT INTO identity_management_operations(id,actor_human_identity_id,kind,intent_digest,result,created_at) VALUES($1,$2,$3,$4,$5,$6)",
+      [id, actor, kind, intent, result, this.clock.now()],
+    );
+  }
+  private async lifecycleEligibility(id: string, action: LifecycleAction) {
+    const assessment = await this.assess(id);
+    const blockers: string[] = [];
+    if (assessment.protectedIdentity) blockers.push("PROTECTED_IDENTITY");
+    if (assessment.unknownCoverage) blockers.push("DEPENDENCIES_NOT_VERIFIED");
+    if (assessment.relationshipsPresent)
+      blockers.push("RELATIONSHIPS_REQUIRE_REVIEW");
+    if (assessment.purpose !== "test")
+      blockers.push("OWNER_CONSENT_REQUIRED_OR_CONFIRMED_TEST");
+    if (action === "reactivate" && assessment.lifecycle !== "suspended")
+      blockers.push("NOT_SUSPENDED");
+    if (action !== "reactivate" && assessment.lifecycle === "retired")
+      blockers.push("RETIRED_IS_TERMINAL");
+    return {
+      assessment,
+      action,
+      blockers,
+      eligible: blockers.length === 0,
+      affectedSessionCount:
+        action === "reactivate" ? 0 : assessment.nonRevokedSessionCount,
+      sessionPolicy:
+        action === "reactivate"
+          ? "No old session is restored; fresh sign-in required"
+          : "Revoke every non-revoked session belonging only to this Human",
+      retirementPolicy:
+        "Retirement retains all records and is terminal under the existing Human domain policy",
+      executionEnabled: this.executionEnabled,
+    };
+  }
+  async previewLifecycle(
+    token: SessionId,
+    ids: string[],
+    action: LifecycleAction,
+  ) {
+    return this.db.withTransaction(async () => {
+      const a = await this.admin(token);
+      const accounts = await Promise.all(
+        ids.map((id) => this.lifecycleEligibility(id, action)),
+      );
+      await this.audit(a.humanIdentityId, "human.lifecycle.previewed", "bulk", {
+        count: String(ids.length),
+        action,
+      });
+      return {
+        accounts,
+        executionEnabled: this.executionEnabled,
+        permanentDeletionEnabled: false,
+      };
+    });
+  }
+  async lifecycle(
+    token: SessionId,
+    input: {
+      humanIdentityId: string;
+      action: LifecycleAction;
+      reviewDigest: string;
+      requestId: string;
+      confirmation: string;
+      revokeSessions: boolean;
+    },
+  ) {
+    await this.admin(token, true);
+    this.gate();
+    return this.db.withIdentityManagementTransaction(async () => {
+      const a = await this.admin(token, true),
+        intent = digest(input);
+      const prev = await this.previous(
+        input.requestId,
+        a.humanIdentityId,
+        "lifecycle",
+        intent,
+      );
+      if (prev) return prev;
+      const p = await this.lifecycleEligibility(
+        input.humanIdentityId,
+        input.action,
+      );
+      if (!p.eligible) reject("LIFECYCLE_BLOCKED", p.blockers.join(", "));
+      if (p.assessment.reviewDigest !== input.reviewDigest)
+        reject("REVIEW_CHANGED", "Evidence changed. Refresh the preview.");
+      if (
+        input.confirmation !== `${input.action} ${input.humanIdentityId}` ||
+        (input.action !== "reactivate" && !input.revokeSessions)
+      )
+        reject(
+          "CONFIRMATION_REQUIRED",
+          "Confirm the exact Human and session impact.",
+        );
+      const h = (await this.humans.findById(
+        HumanIdentityId.from(input.humanIdentityId),
+      ))!;
+      if (input.action === "suspend") h.suspend(this.clock);
+      else if (input.action === "reactivate") h.reactivate(this.clock);
+      else h.retire(this.clock);
+      await this.humans.save(h);
+      if (input.action !== "reactivate")
+        await this.sessions.revokeByHumanIdentityId(h.id);
+      const result = {
+        humanIdentityId: h.id.value,
+        status: h.status,
+        requestId: input.requestId,
+      };
+      await this.audit(
+        a.humanIdentityId,
+        `human.${input.action}.completed`,
+        h.id.value,
+        { requestId: input.requestId, sessionPolicy: p.sessionPolicy },
+      );
+      await this.record(
+        input.requestId,
+        a.humanIdentityId,
+        "lifecycle",
+        intent,
+        result,
+      );
+      return result;
+    });
+  }
+  async bulk(
+    token: SessionId,
+    items: Parameters<IdentityManagement["lifecycle"]>[1][],
+    confirmation: string,
+  ) {
+    this.gate();
+    await this.admin(token, true);
+    if (confirmation !== `review ${items.length} identities`)
+      reject("CONFIRMATION_REQUIRED", "Confirm the selected count.");
+    const results = [];
+    for (const item of items) {
+      try {
+        results.push({
+          humanIdentityId: item.humanIdentityId,
+          state: "completed",
+          result: await this.lifecycle(token, item),
+        });
+      } catch (error) {
+        results.push({
+          humanIdentityId: item.humanIdentityId,
+          state: "blocked",
+          code: error instanceof AppError ? error.code : "OPERATION_FAILED",
+        });
+      }
+    }
+    return { results };
+  }
+  async registerInspector(
+    token: SessionId,
+    productId: string,
+    workloadId: string,
+  ) {
+    await this.admin(token, true);
+    this.gate();
+    return this.db.withIdentityManagementTransaction(async () => {
+      const a = await this.admin(token, true);
+      const w = await this.plane.findWorkload(workloadId);
+      if (!w || w.productId !== productId || w.status !== "active")
+        reject(
+          "INSPECTOR_INVALID",
+          "An active workload belonging to this product is required.",
+        );
+      await this.db.query(
+        "INSERT INTO product_dependency_inspectors(product_id,workload_id,coverage,revision) VALUES($1,$2,'complete',1) ON CONFLICT(product_id) DO UPDATE SET workload_id=EXCLUDED.workload_id,revision=product_dependency_inspectors.revision+1",
+        [productId, workloadId],
+      );
+      await this.audit(
+        a.humanIdentityId,
+        "dependency.inspector.registered",
+        productId,
+        { workloadId },
+      );
+      return { productId, workloadId };
+    });
+  }
+  async reportDependencies(
+    workloadId: string,
+    secret: string,
+    input: {
+      humanIdentityId: string;
+      counts: Record<string, number>;
+      evidenceReference: string;
+      observedAt: string;
+    },
+  ) {
+    this.gate();
+    return this.db.withTransaction(async () => {
+      const w = await this.controlPlane.authenticateWorkload(
+        workloadId,
+        secret,
+      );
+      if (!w)
+        throw new AppError(
+          "Product authorization is required",
+          "WORKLOAD_INVALID",
+          401,
+        );
+      const r = await this.db.query<{ revision: number; workload_id: string }>(
+        "SELECT revision,workload_id FROM product_dependency_inspectors WHERE product_id=$1",
+        [w.productId],
+      );
+      const inspector = r.rows[0];
+      if (!inspector || inspector.workload_id !== workloadId)
+        throw new AppError(
+          "This workload has no dependency inspection authority",
+          "INSPECTOR_NOT_AUTHORIZED",
+          403,
+        );
+      await this.metadata(input.humanIdentityId);
+      const now = this.clock.now(),
+        observed = new Date(input.observedAt);
+      if (
+        !Number.isFinite(observed.getTime()) ||
+        observed > now ||
+        observed.getTime() < now.getTime() - 60000
+      )
+        reject("EVIDENCE_STALE", "Report a current product snapshot.");
+      const saved = await this.db.query(
+        "INSERT INTO product_dependency_reports(product_id,human_identity_id,inspector_revision,counts,evidence_reference,observed_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(product_id,human_identity_id) DO UPDATE SET inspector_revision=EXCLUDED.inspector_revision,counts=EXCLUDED.counts,evidence_reference=EXCLUDED.evidence_reference,observed_at=EXCLUDED.observed_at,expires_at=EXCLUDED.expires_at WHERE product_dependency_reports.observed_at<=EXCLUDED.observed_at",
+        [
+          w.productId,
+          input.humanIdentityId,
+          inspector.revision,
+          input.counts,
+          input.evidenceReference,
+          observed,
+          new Date(observed.getTime() + 60000),
+        ],
+      );
+      if (saved.rowCount !== 1)
+        reject("EVIDENCE_STALE", "A newer report exists.");
+      await this.plane.appendAudit({
+        id: randomUUID(),
+        eventType: "dependency.report.received",
+        actorReference: `product-workload:${workloadId}`,
+        subjectReference: input.humanIdentityId,
+        productId: w.productId,
+        eventData: {
+          coverage: "complete",
+          evidenceReference: input.evidenceReference,
+        },
+        occurredAt: now,
+      });
+      return { recorded: true };
+    });
+  }
+  async prepareRecovery(token: SessionId, source: string, target: string) {
+    await this.admin(token, true);
+    this.gate();
+    return this.db.withIdentityManagementTransaction(async () => {
+      const a = await this.admin(token, true);
+      if (source === target)
+        reject("PAIR_INVALID", "Select two different Humans.");
+      await this.metadata(source);
+      await this.metadata(target);
+      const id = randomUUID(),
+        nonce = randomBytes(32).toString("base64url"),
+        now = this.clock.now();
+      await this.db.query(
+        `INSERT INTO identity_management_cases(id,actor_human_identity_id,source_human_identity_id,target_human_identity_id,provider,nonce,state,created_at,expires_at) VALUES($1,$2,$3,$4,'google',$5,'awaiting_proof',$6,$7)`,
+        [
+          id,
+          a.humanIdentityId,
+          source,
+          target,
+          nonce,
+          now,
+          new Date(now.getTime() + 900000),
+        ],
+      );
+      await this.audit(a.humanIdentityId, "recovery.control.requested", id, {
+        source,
+        target,
+      });
+      return {
+        caseId: id,
+        nonce,
+        provider: "google",
+        expiresAt: new Date(now.getTime() + 900000).toISOString(),
+        nextAction:
+          "Freshly sign in to both Humans through supported authentication, then verify Google with this nonce.",
+      };
+    });
+  }
+  private async case(id: string, actor: string) {
+    const r = await this.db.query<RecoveryCase>(
+      "SELECT * FROM identity_management_cases WHERE id=$1 FOR UPDATE",
+      [id],
+    );
+    const c = r.rows[0];
+    if (!c || c.actor_human_identity_id !== actor)
+      throw new AppError("Recovery case not found", "RECOVERY_NOT_FOUND", 404);
+    return c;
+  }
+  async proveRecovery(
+    token: SessionId,
+    input: {
+      caseId: string;
+      sourceSession: string;
+      targetSession: string;
+      identityToken: string;
+    },
+  ) {
+    await this.admin(token, true);
+    this.gate();
+    // Verify using configured issuer, signature and audience policy. Never accept caller-supplied subject or "verified" boolean.
+    const actor = await this.admin(token, true);
+    const loaded = await this.db.withTransaction(() =>
+      this.case(input.caseId, actor.humanIdentityId),
+    );
+    let verified;
+    try {
+      verified = await this.verifiers.verify(
+        FederatedIdentityProvider.from("google"),
+        { identityToken: input.identityToken, nonce: loaded.nonce },
+      );
+    } catch {
+      throw new AppError(
+        "Google ownership could not be verified",
+        "OWNERSHIP_INVALID",
+        403,
+      );
+    }
+    return this.db.withIdentityManagementTransaction(async () => {
+      const a = await this.admin(token, true),
+        c = await this.case(input.caseId, a.humanIdentityId),
+        now = this.clock.now();
+      if (
+        c.state !== "awaiting_proof" ||
+        c.expires_at <= now ||
+        verified.expiresAt <= now
+      )
+        reject("PROOF_EXPIRED_OR_USED", "Start a new recovery verification.");
+      const source = await this.owner(
+          SessionId.from(input.sourceSession),
+          true,
+        ),
+        target = await this.owner(SessionId.from(input.targetSession), true);
+      if (
+        source.humanIdentityId.value !== c.source_human_identity_id ||
+        target.humanIdentityId.value !== c.target_human_identity_id ||
+        source.authenticatedAt < c.created_at ||
+        target.authenticatedAt < c.created_at
+      )
+        reject(
+          "CONTROL_INVALID",
+          "Fresh sign-in to each selected Human after preparation is required.",
+        );
+      await this.federated.lockProviderSubject(
+        verified.provider,
+        verified.providerSubject,
+      );
+      const relationship = await this.federated.findByProviderSubject(
+        verified.provider,
+        verified.providerSubject,
+      );
+      if (
+        !relationship ||
+        relationship.status !== "active" ||
+        relationship.humanIdentityId.value !== c.source_human_identity_id
+      )
+        reject(
+          "SUBJECT_CONFLICT",
+          "The verified Google account does not belong to the selected source.",
+        );
+      if (
+        !(await this.nonces.consume(
+          verified.provider,
+          verified.nonceHash,
+          verified.expiresAt,
+          now,
+        ))
+      )
+        reject("PROOF_REPLAY", "Use a fresh Google verification.");
+      const until = new Date(
+        Math.min(
+          now.getTime() + 300000,
+          verified.expiresAt.getTime(),
+          c.expires_at.getTime(),
+        ),
+      );
+      for (const s of [source, target]) {
+        const r = await this.db.query(
+          "INSERT INTO identity_management_control_proofs(session_hash,case_id,human_identity_id,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+          [digest(s.id.value), c.id, s.humanIdentityId.value, until],
+        );
+        if (r.rowCount !== 1)
+          reject(
+            "CONTROL_REPLAY",
+            "Fresh account-control proof is required for this case.",
+          );
+      }
+      await this.db.query(
+        "UPDATE identity_management_cases SET state='verified',relationship_id=$2,proof_expires_at=$3 WHERE id=$1",
+        [c.id, relationship.id.value, until],
+      );
+      await this.audit(a.humanIdentityId, "recovery.control.verified", c.id, {
+        source: c.source_human_identity_id,
+        target: c.target_human_identity_id,
+        provider: "google",
+        subjectMatch: "true",
+      });
+      return {
+        caseId: c.id,
+        controlVerified: true,
+        providerSubjectMatched: true,
+        expiresAt: until.toISOString(),
+      };
+    });
+  }
+  private async recoveryPreview(c: RecoveryCase) {
+    const source = await this.assess(c.source_human_identity_id, c.id),
+      target = await this.assess(c.target_human_identity_id, c.id),
+      blockers: string[] = [];
+    if (
+      c.state !== "verified" ||
+      !c.proof_expires_at ||
+      c.proof_expires_at <= this.clock.now()
+    )
+      blockers.push("FRESH_CONTROL_REQUIRED");
+    if (source.lifecycle !== "active" || target.lifecycle !== "active")
+      blockers.push("HUMAN_NOT_ACTIVE");
+    if (source.protectedIdentity) blockers.push("PROTECTED_SOURCE");
+    if (source.relationshipsPresent)
+      blockers.push("SOURCE_DEPENDENCIES_PRESENT");
+    if (source.unknownCoverage) blockers.push("SOURCE_DEPENDENCIES_UNKNOWN");
+    const methods = source.human.authenticationMethods.filter(
+      (x) => x.status === "active",
+    );
+    if (methods.length !== 1 || methods[0]?.method !== "google")
+      blockers.push("SOURCE_NOT_GOOGLE_ONLY");
+    // Historical credentials/relationships are retained and are also dependencies, not merely active methods.
+    if (source.human.authenticationMethods.length !== 1)
+      blockers.push("SOURCE_AUTHENTICATION_HISTORY");
+    if (target.human.authenticationMethods.some((x) => x.method === "google"))
+      blockers.push("TARGET_GOOGLE_RELATIONSHIP_EXISTS");
+    const targetMethods = target.human.authenticationMethods.filter(
+      (x) => x.status === "active",
+    );
+    if (
+      !targetMethods.some(
+        (x) => x.method === "apple" || x.method === "email_password",
+      )
+    )
+      blockers.push("TARGET_ACCESS_UNVERIFIED");
+    const sessionImpact = source.sessions.map((s) => ({
+      reference: s.reference,
+      status: s.status,
+      renewable: s.renewable,
+    }));
+    const reviewDigest = digest({
+      caseId: c.id,
+      relationship: c.relationship_id,
+      source: source.reviewDigest,
+      target: target.reviewDigest,
+      proofExpiresAt: c.proof_expires_at,
+    });
+    return {
+      caseId: c.id,
+      source,
+      target,
+      blockers,
+      reviewDigest,
+      executionEnabled: this.executionEnabled,
+      sessionImpact,
+      sourceWillLoseSignIn: true,
+      plannedChanges: [
+        "Move the verified Google relationship to the selected primary, retaining relationship ID and creation history",
+        "Revoke every non-revoked source session; no target sessions are revoked",
+        "Preserve both Humans, Apple, Email, application data, roles and entitlements",
+      ],
+    };
+  }
+  async previewRecovery(token: SessionId, id: string) {
+    return this.db.withTransaction(async () => {
+      const a = await this.admin(token);
+      const c = await this.case(id, a.humanIdentityId);
+      const p = await this.recoveryPreview(c);
+      await this.audit(a.humanIdentityId, "recovery.execution.previewed", id);
+      return p;
+    });
+  }
+  async executeRecovery(
+    token: SessionId,
+    input: {
+      caseId: string;
+      requestId: string;
+      reviewDigest: string;
+      confirmation: string;
+      revokeSourceSessions: boolean;
+      acceptSourceLossOfAccess: boolean;
+    },
+  ) {
+    await this.admin(token, true);
+    this.gate();
+    return this.db.withIdentityManagementTransaction(async () => {
+      const a = await this.admin(token, true),
+        intent = digest(input);
+      const prev = await this.previous(
+        input.requestId,
+        a.humanIdentityId,
+        "google_transfer",
+        intent,
+      );
+      if (prev) return prev;
+      const c = await this.case(input.caseId, a.humanIdentityId);
+      const p = await this.recoveryPreview(c);
+      if (p.blockers.length) reject("RECOVERY_BLOCKED", p.blockers.join(", "));
+      if (p.reviewDigest !== input.reviewDigest)
+        reject("REVIEW_CHANGED", "Evidence changed. Refresh the preview.");
+      if (
+        input.confirmation !==
+          `transfer google ${c.source_human_identity_id} to ${c.target_human_identity_id}` ||
+        !input.revokeSourceSessions ||
+        !input.acceptSourceLossOfAccess
+      )
+        reject(
+          "CONFIRMATION_REQUIRED",
+          "Explicit source session revocation and loss of source sign-in consent are required.",
+        );
+      const proofs = await this.db.query<{
+        human_identity_id: string;
+        session_hash: string;
+        expires_at: Date;
+      }>(
+        "SELECT human_identity_id,session_hash,expires_at FROM identity_management_control_proofs WHERE case_id=$1",
+        [c.id],
+      );
+      for (const id of [
+        c.source_human_identity_id,
+        c.target_human_identity_id,
+      ]) {
+        const proof = proofs.rows.find((x) => x.human_identity_id === id);
+        if (!proof || proof.expires_at <= this.clock.now())
+          reject("CONTROL_EXPIRED", "Verify control again.");
+        const sessions = await this.sessions.listByHumanIdentityId(
+          HumanIdentityId.from(id),
+        );
+        if (
+          !sessions.some(
+            (s) =>
+              digest(s.id.value) === proof.session_hash &&
+              s.status === "active" &&
+              s.expiresAt > this.clock.now(),
+          )
+        )
+          reject(
+            "CONTROL_REVOKED",
+            "Account-control session is no longer valid.",
+          );
+      }
+      const provider = FederatedIdentityProvider.from("google");
+      await this.federated.lockHumanProvider(
+        HumanIdentityId.from(c.source_human_identity_id),
+        provider,
+      );
+      await this.federated.lockHumanProvider(
+        HumanIdentityId.from(c.target_human_identity_id),
+        provider,
+      );
+      const relationship =
+        await this.federated.findActiveByHumanIdentityAndProvider(
+          HumanIdentityId.from(c.source_human_identity_id),
+          provider,
+        );
+      if (!relationship || relationship.id.value !== c.relationship_id)
+        reject("RELATIONSHIP_CHANGED", "Authentication ownership changed.");
+      await this.federated.lockProviderSubject(
+        provider,
+        relationship.providerSubject,
+      );
+      relationship.disable(this.clock);
+      await this.federated.save(relationship);
+      relationship.reassignTo(
+        HumanIdentityId.from(c.target_human_identity_id),
+        this.clock,
+      );
+      relationship.activate(this.clock);
+      await this.federated.save(relationship);
+      await this.sessions.revokeByHumanIdentityId(
+        HumanIdentityId.from(c.source_human_identity_id),
+      );
+      await this.db.query(
+        "UPDATE identity_management_cases SET state='completed' WHERE id=$1",
+        [c.id],
+      );
+      const ownerAfter =
+        await this.federated.findActiveByHumanIdentityAndProvider(
+          HumanIdentityId.from(c.target_human_identity_id),
+          provider,
+        );
+      if (
+        ownerAfter?.id.value !== c.relationship_id ||
+        (
+          await this.sessions.listByHumanIdentityId(
+            HumanIdentityId.from(c.source_human_identity_id),
+          )
+        ).some((s) => s.status !== "revoked")
+      )
+        reject(
+          "POSTCONDITION_FAILED",
+          "Recovery verification failed; no changes were committed.",
+        );
+      const result = {
+        caseId: c.id,
+        requestId: input.requestId,
+        sourceHumanIdentityId: c.source_human_identity_id,
+        targetHumanIdentityId: c.target_human_identity_id,
+        provider: "google",
+        state: "completed",
+      };
+      await this.audit(a.humanIdentityId, "recovery.google.transferred", c.id, {
+        source: c.source_human_identity_id,
+        target: c.target_human_identity_id,
+        requestId: input.requestId,
+        sourceSessions: "revoked",
+        records: "retained",
+      });
+      await this.record(
+        input.requestId,
+        a.humanIdentityId,
+        "google_transfer",
+        intent,
+        result,
+      );
+      return result;
+    });
+  }
+}

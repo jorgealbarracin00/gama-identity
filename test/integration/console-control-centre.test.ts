@@ -12,10 +12,10 @@ import {SessionId} from '../../src/sessions/domain/session-id.js';
 import type {FastifyInstance} from 'fastify';
 const url=process.env.POSTGRES_CONSOLE_TEST_DATABASE_URL;
 describe('Console V2 deterministic helpers',()=>{
- it('uses preferred name then verified email then identifier, without inventing a name',()=>{
+ it('uses preferred name then verified email then an unavailable-name label, without inventing a name',()=>{
   assert.equal(resolvedDisplayName(' Preferred ', 'person@example.test','abcdefghi').displayName,'Preferred');
   assert.deepEqual(resolvedDisplayName(null,'some.name@example.test','abcdefghi'),{displayName:'some.name@example.test',displayNameSource:'verified_email'});
-  assert.equal(resolvedDisplayName(null,null,'abcdefghi').displayName,'Human abcdefgh');
+  assert.equal(resolvedDisplayName(null,null,'abcdefghi').displayName,'Name unavailable');
  });
  it('binds keyset cursors to every filter and sort',()=>{
   const s=directoryFingerprint({query:'Alice',sort:'name'}),c=pageCursor(s,'alice','human');

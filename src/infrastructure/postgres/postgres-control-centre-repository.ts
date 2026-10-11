@@ -7,10 +7,12 @@ import { resolvedDisplayName } from "../../control-plane/application/console-con
 const verifiedEmail=`coalesce((SELECT normalized_email FROM credentials WHERE human_identity_id=h.id AND email_verified_at IS NOT NULL AND status='active' ORDER BY created_at LIMIT 1),
  (SELECT provider_email FROM federated_identities WHERE human_identity_id=h.id AND provider_email_verified=true AND status='active' ORDER BY created_at LIMIT 1))`;
 const dateSQL=(value:string)=>`to_char(${value} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
-const selectedHuman=`SELECT h.id,h.status,h.created_at,p.preferred_display_name,${verifiedEmail} AS email,
+const selectedHuman=`SELECT h.id,h.status,h.created_at,p.preferred_display_name,coalesce(hp.purpose,'unknown') AS purpose,coalesce(hp.revision,0) AS classification_revision,${verifiedEmail} AS email,
  (SELECT max(last_accessed_at) FROM sessions WHERE human_identity_id=h.id) AS last_activity
- FROM human_identities h LEFT JOIN human_profiles p ON p.human_identity_id=h.id`;
-const projection=`SELECT h.id AS "humanIdentityId",h.status,h.preferred_display_name AS "preferredDisplayName",h.email,
+ FROM human_identities h LEFT JOIN human_profiles p ON p.human_identity_id=h.id LEFT JOIN human_purposes hp ON hp.human_identity_id=h.id`;
+const projection=`SELECT h.id AS "humanIdentityId",h.status,h.preferred_display_name AS "preferredDisplayName",h.email,h.purpose,h.classification_revision AS "classificationRevision",
+ CASE WHEN h.last_activity BETWEEN now()-interval '30 days' AND now() THEN 'recently_active' ELSE 'unknown' END AS activity,
+ EXISTS(SELECT 1 FROM (SELECT normalized_email AS e FROM credentials WHERE human_identity_id=h.id UNION ALL SELECT provider_email AS e FROM federated_identities WHERE human_identity_id=h.id) emails WHERE lower(e) ~ '^jorgealbarracin\\+[^@[:space:]]+@gmail\\.com$') AS "potentialTestCandidate",
  ${dateSQL('h.created_at')} AS "createdAt",${dateSQL('h.last_activity')} AS "lastActivityAt",
  coalesce((SELECT json_agg(json_build_object('method',m.method,'status',m.status,'email',m.email,'emailVerified',m.verified) ORDER BY m.method,m.created_at) FROM (
  SELECT 'email_password' AS method,status,normalized_email AS email,email_verified_at IS NOT NULL AS verified,created_at FROM credentials WHERE human_identity_id=h.id
@@ -33,21 +35,25 @@ export class PostgresControlCentreRepository implements ControlCentreRepository 
     SELECT * FROM candidates h WHERE ($1='' OR strpos(lower(h.id),$1)>0 OR strpos(lower(coalesce(h.preferred_display_name,'')),$1)>0 OR EXISTS(SELECT 1 FROM credentials WHERE human_identity_id=h.id AND strpos(lower(normalized_email),$1)>0) OR EXISTS(SELECT 1 FROM federated_identities WHERE human_identity_id=h.id AND strpos(lower(coalesce(provider_email,'')),$1)>0))
     AND ($2='' OR status=$2) AND ($3='' OR ($3='email_password' AND EXISTS(SELECT 1 FROM credentials WHERE human_identity_id=h.id AND status='active')) OR EXISTS(SELECT 1 FROM federated_identities WHERE human_identity_id=h.id AND provider=$3 AND status='active'))
     AND ($4='' OR EXISTS(SELECT 1 FROM human_product_participations WHERE human_identity_id=h.id AND product_id=$4) OR EXISTS(SELECT 1 FROM product_entitlements WHERE human_identity_id=h.id AND product_id=$4))
+    AND ($7='all' OR ($7 IN ('production','test') AND purpose=$7) OR ($7 IN ('suspended','retired') AND status=$7)
+ OR ($7='needs_review' AND purpose='unknown') OR ($7='duplicates' AND EXISTS(SELECT 1 FROM (SELECT human_identity_id,lower(trim(normalized_email)) AS e FROM credentials UNION ALL SELECT human_identity_id,lower(trim(provider_email)) AS e FROM federated_identities WHERE provider_email IS NOT NULL) own JOIN (SELECT human_identity_id,lower(trim(normalized_email)) AS e FROM credentials UNION ALL SELECT human_identity_id,lower(trim(provider_email)) AS e FROM federated_identities WHERE provider_email IS NOT NULL) other ON own.e=other.e AND own.human_identity_id<>other.human_identity_id WHERE own.human_identity_id=h.id)))
     AND ($5::text IS NULL OR (sort_key COLLATE "C",id COLLATE "C") ${descending?'<':'>'} ($5 COLLATE "C",$6 COLLATE "C"))
     ORDER BY sort_key COLLATE "C" ${descending?'DESC':'ASC'},id COLLATE "C" ${descending?'DESC':'ASC'} LIMIT 51)
    ${projection},h.sort_key AS "sortKey" FROM selected h ORDER BY h.sort_key COLLATE "C" ${descending?'DESC':'ASC'},h.id COLLATE "C" ${descending?'DESC':'ASC'}`,
-   [input.query?.trim().toLowerCase()??'',input.status??'',input.provider??'',input.productId??'',after?.key??null,after?.id??null]);
+   [input.query?.trim().toLowerCase()??'',input.status??'',input.provider??'',input.productId??'',after?.key??null,after?.id??null,input.filter??"all"]);
   return r.rows.map(row=>({...human(row),sortKey:row.sortKey}));
  }
  async human(id:string) {const r=await this.db.query<ConsoleHuman>(`WITH selected AS (${selectedHuman} WHERE h.id=$1) ${projection} FROM selected h`,[id]);return r.rows[0]?human(r.rows[0]):null;}
  async summary() {
   const r=await this.db.query<Record<string,string>>(`SELECT
+   (SELECT count(*) FROM human_purposes WHERE purpose='test') AS "testIdentities",
+   (SELECT count(*) FROM human_identities h WHERE NOT EXISTS(SELECT 1 FROM human_purposes WHERE human_identity_id=h.id AND purpose<>'unknown') AND EXISTS(SELECT 1 FROM (SELECT normalized_email AS e FROM credentials WHERE human_identity_id=h.id UNION ALL SELECT provider_email AS e FROM federated_identities WHERE human_identity_id=h.id) emails WHERE lower(e) ~ '^jorgealbarracin\\+[^@[:space:]]+@gmail\\.com$')) AS "testCandidates",
    (SELECT count(*) FROM human_identities) AS humans,(SELECT count(*) FROM registered_products) AS products,(SELECT count(*) FROM tenants) AS businesses,
    (SELECT count(DISTINCT human_identity_id) FROM human_product_participations WHERE status='active') AS "knownParticipants",
    (SELECT count(*) FROM (SELECT lower(trim(email)) FROM (SELECT human_identity_id,normalized_email AS email FROM credentials UNION ALL SELECT human_identity_id,provider_email AS email FROM federated_identities WHERE provider_email IS NOT NULL) e GROUP BY lower(trim(email)) HAVING count(DISTINCT human_identity_id)>1) duplicates) AS "duplicateEmailGroups",
    (SELECT count(*) FROM identity_recovery_requests WHERE state='review_required') AS "pendingRecoveryRequests",
    (SELECT count(*) FROM google_identity_verification_cases WHERE payload->>'state'='awaiting_proof' AND (payload->>'expiresAt')::timestamptz>now()) AS "pendingVerificationCases"`);
-  const row=r.rows[0]!;return {humans:Number(row.humans),products:Number(row.products),businesses:Number(row.businesses),knownParticipants:Number(row.knownParticipants),duplicateEmailGroups:Number(row.duplicateEmailGroups),pendingRecoveryRequests:Number(row.pendingRecoveryRequests),pendingVerificationCases:Number(row.pendingVerificationCases)};
+  const row=r.rows[0]!;return {testIdentities:Number(row.testIdentities),testCandidates:Number(row.testCandidates),humans:Number(row.humans),products:Number(row.products),businesses:Number(row.businesses),knownParticipants:Number(row.knownParticipants),duplicateEmailGroups:Number(row.duplicateEmailGroups),pendingRecoveryRequests:Number(row.pendingRecoveryRequests),pendingVerificationCases:Number(row.pendingVerificationCases)};
  }
  async products() {
   const r=await this.db.query<{id:string;displayName:string;status:string;participants:number;entitledHumans:number;businesses:number;workloads:number}>(`SELECT p.id,p.display_name AS "displayName",p.status,

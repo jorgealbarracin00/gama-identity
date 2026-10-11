@@ -32,7 +32,7 @@ export class PostgresSessionRepository implements SessionRepository {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (id) DO UPDATE SET
          last_accessed_at = EXCLUDED.last_accessed_at,
-         status = EXCLUDED.status,
+         status = CASE WHEN sessions.status = 'revoked' THEN 'revoked' ELSE EXCLUDED.status END,
          renewal_token_hash = EXCLUDED.renewal_token_hash,
          renewal_expires_at = EXCLUDED.renewal_expires_at`,
       [

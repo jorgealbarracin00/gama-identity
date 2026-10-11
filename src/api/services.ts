@@ -1,3 +1,4 @@
+import { IdentityManagement, syntheticManagementEnabled } from '../control-plane/application/identity-management.js';
 import { GoogleRecoveryVerification } from "../control-plane/application/google-recovery-verification.js";
 import { ConsoleControlCentre } from "../control-plane/application/console-control-centre.js";
 import { PostgresControlCentreRepository } from "../infrastructure/postgres/postgres-control-centre-repository.js";
@@ -104,6 +105,7 @@ import { SerialExecutor } from "../shared/serial-executor.js";
 
 export interface AdministrationServices {
   readonly controlCentre?: ConsoleControlCentre;
+  readonly identityManagement?: IdentityManagement;
   readonly platform: PlatformAdministration;
   readonly identityExplorer: IdentityExplorer;
   readonly googleVerification?: GoogleRecoveryVerification;
@@ -167,6 +169,7 @@ export async function buildRuntime(
       const code = (error as Error & { code?: string }).code;
       logger.error({ code }, "Unexpected idle PostgreSQL client error");
     },
+    syntheticManagementEnabled(runtimeConfig),
   );
   try {
     await database.checkConnection();
@@ -265,7 +268,10 @@ export async function buildRuntime(
       }),
       register: new TransactionalRegister(services.register, database),
       controlPlane,
-      administration: { ...administration, ...(googleVerification === undefined ? {} : { googleVerification }),
+      administration: { ...administration,
+        identityManagement: new IdentityManagement(database,new PostgresControlCentreRepository(database),new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,identities,sessions,federatedIdentities,federatedNonces,
+          new FederatedIdentityTokenVerifiers([runtimeConfig.GOOGLE_CLIENT_IDS.length===0 ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER) : new GoogleIdentityTokenVerifier({clientIds:runtimeConfig.GOOGLE_CLIENT_IDS})]),clock,syntheticManagementEnabled(runtimeConfig),controlPlane,syntheticManagementEnabled(runtimeConfig)?[]:["cashcast","grocery-master",...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId==="coco-web"?"coco-the-llama":app.appId==="cashcast-preview"?"cashcast":app.appId)]),
+        ...(googleVerification === undefined ? {} : { googleVerification }),
         controlCentre: new ConsoleControlCentre(new PostgresControlCentreRepository(database),
           new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,
           identities,sessions,controlPlane,clock,work=>database.withTransaction(work),
@@ -441,8 +447,9 @@ function composeServices(
     runtimeConfig.SESSION_DURATION_SECONDS,
     renewalTokens,
     runtimeConfig.SESSION_RENEWAL_DURATION_SECONDS,
+    identities,
   );
-  const validateSession = new ValidateSession(sessions, clock);
+  const validateSession = new ValidateSession(sessions, clock, atomically, identities);
   const emailPasswordSecurity = new EmailPasswordSecurity(
     credentials,
     sessions,
@@ -565,7 +572,7 @@ function composeServices(
       createSession,
       compensator,
     ),
-    login: new Login(authenticate, createSession),
+    login: new Login(authenticate, createSession, atomically),
     authenticateFederated,
     ...(authenticateAppleWeb === undefined ? {} : { authenticateAppleWeb }),
     ...(authenticateGoogleWeb === undefined ? {} : { authenticateGoogleWeb }),

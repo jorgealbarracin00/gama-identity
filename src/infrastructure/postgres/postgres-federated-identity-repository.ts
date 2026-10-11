@@ -1,3 +1,4 @@
+import { AppError } from '../../shared/errors.js';
 import {
   FederatedIdentityHumanProviderConflictError,
   FederatedIdentitySubjectConflictError,
@@ -27,6 +28,7 @@ interface FederatedIdentityRow {
   readonly status: FederatedIdentityStatus;
   readonly created_at: Date;
   readonly updated_at: Date;
+  readonly write_revision: string;
 }
 
 interface PostgresError {
@@ -35,12 +37,14 @@ interface PostgresError {
 }
 
 export class PostgresFederatedIdentityRepository implements FederatedIdentityRepository {
+  private readonly versions=new WeakMap<FederatedIdentity,string>();
   constructor(private readonly database: DatabaseQuery) {}
+  private hydrate(row:FederatedIdentityRow){const entity=toFederatedIdentity(row);this.versions.set(entity,String(row.write_revision));return entity;}
 
   async save(identity: FederatedIdentity): Promise<void> {
     const snapshot = identity.snapshot();
     try {
-      await this.database.query(
+      const result=await this.database.query<{write_revision:string}>(
         `INSERT INTO federated_identities (
            id, human_identity_id, provider, provider_subject,
            provider_email, provider_email_verified, provider_email_private,
@@ -52,7 +56,9 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
            provider_email_verified = EXCLUDED.provider_email_verified,
            provider_email_private = EXCLUDED.provider_email_private,
            status = EXCLUDED.status,
-           updated_at = EXCLUDED.updated_at`,
+           updated_at = EXCLUDED.updated_at, write_revision=federated_identities.write_revision+1
+           WHERE federated_identities.write_revision=$11
+           RETURNING write_revision`,
         [
           snapshot.id.value,
           snapshot.humanIdentityId.value,
@@ -64,8 +70,11 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
           snapshot.status,
           snapshot.createdAt,
           snapshot.updatedAt,
+          this.versions.get(identity) ?? "-1",
         ],
       );
+      if(!result.rows[0]) throw new AppError("Authentication relationship changed; reload before saving","IDENTITY_WRITE_CONFLICT",409);
+      this.versions.set(identity,String(result.rows[0].write_revision));
     } catch (error) {
       const postgresError = error as PostgresError;
       if (
@@ -91,24 +100,13 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
     const result = await this.database.query<FederatedIdentityRow>(
       `SELECT id, human_identity_id, provider, provider_subject,
               provider_email, provider_email_verified, provider_email_private,
-              status, created_at, updated_at
+              status, created_at, updated_at, write_revision
        FROM federated_identities
        WHERE provider = $1 AND provider_subject = $2`,
       [provider.value, providerSubject.value],
     );
     const row = result.rows[0];
-    return row === undefined ? null : FederatedIdentity.reconstitute({
-      id: FederatedIdentityId.from(row.id),
-      humanIdentityId: HumanIdentityId.from(row.human_identity_id),
-      provider: FederatedIdentityProvider.from(row.provider),
-      providerSubject: FederatedProviderSubject.from(row.provider_subject),
-      providerEmail: row.provider_email,
-      providerEmailVerified: row.provider_email_verified,
-      providerEmailPrivate: row.provider_email_private,
-      status: row.status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    });
+    return row === undefined ? null : this.hydrate(row);
   }
 
 
@@ -119,7 +117,7 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
        ORDER BY created_at, id`,
       [humanIdentityId.value],
     );
-    return result.rows.map(toFederatedIdentity);
+    return result.rows.map(row=>this.hydrate(row));
   }
 
   async listActiveByVerifiedProviderEmail(email: string): Promise<readonly FederatedIdentity[]> {
@@ -131,7 +129,7 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
        ORDER BY created_at, id`,
       [email],
     );
-    return result.rows.map(toFederatedIdentity);
+    return result.rows.map(row=>this.hydrate(row));
   }
 
   async findActiveByHumanIdentityAndProvider(
@@ -143,7 +141,7 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
        WHERE human_identity_id = $1 AND provider = $2 AND status = 'active'`,
       [humanIdentityId.value, provider.value],
     );
-    return result.rows[0] === undefined ? null : toFederatedIdentity(result.rows[0]);
+    return result.rows[0] === undefined ? null : this.hydrate(result.rows[0]);
   }
 
   async lockProviderSubject(
@@ -170,7 +168,7 @@ export class PostgresFederatedIdentityRepository implements FederatedIdentityRep
 const selectFederatedIdentity = `
   SELECT id, human_identity_id, provider, provider_subject,
          provider_email, provider_email_verified, provider_email_private,
-         status, created_at, updated_at
+         status, created_at, updated_at, write_revision
   FROM federated_identities
 `;
 
