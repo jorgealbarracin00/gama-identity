@@ -21,6 +21,10 @@ export class PostgresHumanIdentityRepository
   private readonly versions=new WeakMap<HumanIdentity,string>();
   constructor(private readonly database: DatabaseQuery) {}
 
+  async lockForAccountManagement(id: HumanIdentityId): Promise<void> {
+    await this.database.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`account-methods:${id.value}`]);
+  }
+
   async save(identity: HumanIdentity): Promise<void> {
     const snapshot = identity.snapshot();
     const result=await this.database.query<{write_revision:string}>(

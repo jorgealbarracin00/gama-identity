@@ -33,12 +33,17 @@ export class Authenticate {
       }
       throw error;
     }
-    const credential = await this.credentials.findByNormalizedEmail(email);
+    let credential = await this.credentials.findByNormalizedEmail(email);
 
     if (credential === null) {
       return { outcome: "invalid_credentials" };
     }
 
+    // Reload under the same account-method lock used by Email disconnect. The
+    // containing Login transaction holds it until its session is persisted.
+    await this.identities.lockForAccountManagement?.(credential.humanIdentityId);
+    credential = await this.credentials.findByNormalizedEmail(email);
+    if (credential === null) return { outcome: "invalid_credentials" };
     if (!credential.isEligibleForAuthentication()) {
       return { outcome: "credential_unavailable" };
     }

@@ -289,9 +289,13 @@ export class ManageFederatedAuthenticationMethods {
     expectedHumanIdentityId?: HumanIdentityId,
   ): Promise<Session> {
     const scopedLink = forLink && this.linkPolicy !== undefined;
-    const session = forLink
-      ? await this.sessions.findByIdForUpdate(sessionId)
-      : await this.sessions.findById(sessionId);
+    let session = await this.sessions.findById(sessionId);
+    if (forLink && session) {
+      // Acquire Human before session/provider locks. Different sessions cannot
+      // concurrently remove each other's last remaining authentication method.
+      await this.humanIdentities.lockForAccountManagement?.(session.humanIdentityId);
+      session = await this.sessions.findByIdForUpdate(sessionId);
+    }
     if (session === null) throw new FederatedAuthenticationMethodError("SESSION_INVALID");
     if (scopedLink && !this.linkPolicy!.allowedPrincipalIds.has(session.humanIdentityId.value)) {
       throw new FederatedAuthenticationMethodError("IDENTITY_UNAVAILABLE");
