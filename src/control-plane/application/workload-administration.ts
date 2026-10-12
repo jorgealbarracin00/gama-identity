@@ -7,14 +7,14 @@ import { PasswordHash } from "../../authentication/credentials/domain/password.j
 import type { Clock } from "../../shared/clock.js";
 import type { SessionId } from "../../sessions/domain/session-id.js";
 import { AppError } from "../../shared/errors.js";
-import { MANAGED_WORKLOAD_CAPABILITIES, type ManagedWorkloadCapability } from "../models.js";
+import { HUMAN_DATA_CLEANUP_CAPABILITY, MANAGED_WORKLOAD_CAPABILITIES, type ManagedWorkloadCapability } from "../models.js";
 
 const identifier = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u);
 // The operator CLI creates 32 cryptographically random bytes; never use a human password.
 const secret = z.string().regex(/^[A-Za-z0-9_-]{43}$/u).refine(value => Buffer.from(value,"base64url").length===32 && Buffer.from(value,"base64url").toString("base64url")===value && new Set(value).size>=16);
 const reason = z.string().trim().min(8).max(240).regex(/^[^\p{Cc}\p{Cf}]+$/u);
 const common = { requestId:z.uuid(), id:identifier, reason };
-export const workloadCreateSchema = z.object({...common,productId:identifier,secret,capabilities:z.array(z.enum(MANAGED_WORKLOAD_CAPABILITIES)).min(1).max(3).refine(value=>new Set(value).size===value.length)}).strict();
+export const workloadCreateSchema = z.object({...common,productId:identifier,secret,capabilities:z.array(z.enum([...MANAGED_WORKLOAD_CAPABILITIES,HUMAN_DATA_CLEANUP_CAPABILITY])).min(1).max(3).refine(value=>new Set(value).size===value.length)}).strict();
 export const workloadRotateSchema = z.object({...common,expectedRevision:z.number().int().min(1).max(2147483646),secret}).strict();
 export const workloadRevokeSchema = workloadRotateSchema.omit({secret:true}).strict();
 export const workloadInspectSchema = z.object({id:identifier.optional(),cursor:identifier.optional()}).strict().refine(value=>!(value.id&&value.cursor));
@@ -29,7 +29,7 @@ function metadata(row:Omit<Row,"secret_hash">):WorkloadMetadata {return {id:row.
 
 /** Supported server-only operations. This independent gate cannot enable Human management. */
 export class WorkloadAdministration {
-  constructor(private readonly db:PostgresDatabase,private readonly control:ControlPlaneRepository,private readonly passwords:PasswordHasher&PasswordVerifier,private readonly clock:Clock,readonly enabled=false) {}
+  constructor(private readonly db:PostgresDatabase,private readonly control:ControlPlaneRepository,private readonly passwords:PasswordHasher&PasswordVerifier,private readonly clock:Clock,readonly enabled=false,private readonly cleanupProvisioningEnabled=false) {}
   private gate() {if(!this.enabled)throw new AppError("Workload administration is disabled pending separate release approval","WORKLOAD_ADMINISTRATION_DISABLED",403);}
   private async administrator(token:SessionId,lock=false):Promise<string> {
     // Read without ValidateSession: administration never touches or renews sessions.
@@ -59,6 +59,7 @@ export class WorkloadAdministration {
   async revoke(token:SessionId,input:unknown) {return this.mutate(token,"revoke",parse(workloadRevokeSchema,input));}
   private async mutate(token:SessionId,operation:"create"|"rotate"|"revoke",input:Create|Rotate|Revoke):Promise<{workload:WorkloadMetadata;replayed:boolean}> {
     this.gate();await this.administrator(token);
+    if (operation === "create" && "capabilities" in input && input.capabilities.includes(HUMAN_DATA_CLEANUP_CAPABILITY) && !this.cleanupProvisioningEnabled) throw new AppError("Cleanup authority requires separate enabled Human administration","CLEANUP_PROVISIONING_DISABLED",403);
     const reviewMetadata=JSON.stringify({...input,secret:undefined});
     if(reviewMetadata.toLowerCase().includes(token.value.toLowerCase())||("secret" in input&&reviewMetadata.includes(input.secret)))throw new AppError("Credentials cannot appear in workload review metadata","INVALID_REQUEST",400);
     return this.db.withTransaction(async()=>{

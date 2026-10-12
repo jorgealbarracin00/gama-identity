@@ -1,3 +1,4 @@
+import { continuityBlockers } from "./human-continuity.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { ControlPlane } from "./control-plane.js";
 import type { Config } from "../../config/env.js";
@@ -65,6 +66,7 @@ interface RecoveryCase {
   nonce: string;
   relationship_id: string | null;
   state: string;
+  transfer_policy?: "verified_empty_source" | "retain_records";
   created_at: Date;
   expires_at: Date;
   proof_expires_at: Date | null;
@@ -86,6 +88,8 @@ export class IdentityManagement {
     readonly executionEnabled: boolean,
     private readonly controlPlane: ControlPlane,
     private readonly requiredProducts: readonly string[] = [],
+    readonly administrationEnabled = false,
+    readonly recoveryEnabled = false,
   ) {}
   private gate() {
     if (!this.executionEnabled)
@@ -94,6 +98,10 @@ export class IdentityManagement {
         "IDENTITY_MANAGEMENT_DISABLED",
         403,
       );
+  }
+  private gateRecovery() { if (!this.recoveryEnabled) this.gate(); }
+  private gateAdministrative() {
+    if (!this.administrationEnabled) this.gate();
   }
   private async owner(token: SessionId, fresh = false) {
     const s = await this.sessions.findById(token);
@@ -288,10 +296,11 @@ export class IdentityManagement {
     return this.db.withTransaction(async () => {
       const a = await this.admin(token);
       const assessment = await this.assess(id);
+      const deleted = this.administrationEnabled && (await this.db.query("SELECT 1 FROM identity_management_operations WHERE kind='human.delete' AND result->>'humanIdentityId'=$1 LIMIT 1",[id])).rows.length>0;
       await this.audit(a.humanIdentityId, "human.management.inspected", id);
       return {
         ...assessment,
-        executionEnabled: this.executionEnabled,
+        executionEnabled: (this.executionEnabled || this.administrationEnabled) && !deleted,
         permanentDeletionEnabled: false,
       };
     });
@@ -307,7 +316,7 @@ export class IdentityManagement {
     },
   ) {
     await this.admin(token, true);
-    this.gate();
+    this.gateAdministrative();
     return this.db.withIdentityManagementTransaction(async () => {
       const a = await this.admin(token, true);
       const intent = digest(input);
@@ -319,6 +328,7 @@ export class IdentityManagement {
       );
       if (previous) return previous;
       const m = await this.metadata(input.humanIdentityId);
+      if (this.administrationEnabled && (await this.db.query("SELECT 1 FROM identity_management_operations WHERE kind='human.delete' AND result->>'humanIdentityId'=$1 LIMIT 1",[input.humanIdentityId])).rows.length) reject("HUMAN_DEIDENTIFIED","Deleted accounts cannot be reclassified");
       if (m.classificationRevision !== input.expectedRevision)
         reject(
           "CLASSIFICATION_CONFLICT",
@@ -398,12 +408,16 @@ export class IdentityManagement {
   private async lifecycleEligibility(id: string, action: LifecycleAction) {
     const assessment = await this.assess(id);
     const blockers: string[] = [];
+    if (this.administrationEnabled) {
+      if (action !== "reactivate") blockers.push(...await continuityBlockers(this.db,id));
+    } else {
     if (assessment.protectedIdentity) blockers.push("PROTECTED_IDENTITY");
     if (assessment.unknownCoverage) blockers.push("DEPENDENCIES_NOT_VERIFIED");
     if (assessment.relationshipsPresent)
       blockers.push("RELATIONSHIPS_REQUIRE_REVIEW");
     if (assessment.purpose !== "test")
       blockers.push("OWNER_CONSENT_REQUIRED_OR_CONFIRMED_TEST");
+    }
     if (action === "reactivate" && assessment.lifecycle !== "suspended")
       blockers.push("NOT_SUSPENDED");
     if (action !== "reactivate" && assessment.lifecycle === "retired")
@@ -421,7 +435,7 @@ export class IdentityManagement {
           : "Revoke every non-revoked session belonging only to this Human",
       retirementPolicy:
         "Retirement retains all records and is terminal under the existing Human domain policy",
-      executionEnabled: this.executionEnabled,
+      executionEnabled: this.executionEnabled || this.administrationEnabled,
     };
   }
   async previewLifecycle(
@@ -440,7 +454,7 @@ export class IdentityManagement {
       });
       return {
         accounts,
-        executionEnabled: this.executionEnabled,
+        executionEnabled: this.executionEnabled || this.administrationEnabled,
         permanentDeletionEnabled: false,
       };
     });
@@ -457,7 +471,7 @@ export class IdentityManagement {
     },
   ) {
     await this.admin(token, true);
-    this.gate();
+    this.gateAdministrative();
     return this.db.withIdentityManagementTransaction(async () => {
       const a = await this.admin(token, true),
         intent = digest(input);
@@ -518,7 +532,7 @@ export class IdentityManagement {
     items: Parameters<IdentityManagement["lifecycle"]>[1][],
     confirmation: string,
   ) {
-    this.gate();
+    this.gateAdministrative();
     await this.admin(token, true);
     if (confirmation !== `review ${items.length} identities`)
       reject("CONFIRMATION_REQUIRED", "Confirm the selected count.");
@@ -546,7 +560,7 @@ export class IdentityManagement {
     workloadId: string,
   ) {
     await this.admin(token, true);
-    this.gate();
+    this.gateAdministrative();
     return this.db.withIdentityManagementTransaction(async () => {
       const a = await this.admin(token, true);
       const w = await this.plane.findWorkload(workloadId);
@@ -578,7 +592,7 @@ export class IdentityManagement {
       observedAt: string;
     },
   ) {
-    this.gate();
+    this.gateAdministrative();
     return this.db.withTransaction(async () => {
       const w = await this.controlPlane.authenticateWorkload(
         workloadId,
@@ -640,9 +654,9 @@ export class IdentityManagement {
       return { recorded: true };
     });
   }
-  async prepareRecovery(token: SessionId, source: string, target: string) {
+  async prepareRecovery(token: SessionId, source: string, target: string, transferPolicy: "verified_empty_source" | "retain_records" = "verified_empty_source") {
     await this.admin(token, true);
-    this.gate();
+    this.gateRecovery();
     return this.db.withIdentityManagementTransaction(async () => {
       const a = await this.admin(token, true);
       if (source === target)
@@ -658,7 +672,7 @@ export class IdentityManagement {
       );
       await this.auditSupersededCases(a.humanIdentityId, "recovery", superseded.rows, id);
       await this.db.query(
-        `INSERT INTO identity_management_cases(id,actor_human_identity_id,source_human_identity_id,target_human_identity_id,provider,nonce,state,created_at,expires_at) VALUES($1,$2,$3,$4,'google',$5,'awaiting_proof',$6,$7)`,
+        `INSERT INTO identity_management_cases(id,actor_human_identity_id,source_human_identity_id,target_human_identity_id,provider,nonce,state,created_at,expires_at,transfer_policy) VALUES($1,$2,$3,$4,'google',$5,'awaiting_proof',$6,$7,$8)`,
         [
           id,
           a.humanIdentityId,
@@ -667,6 +681,7 @@ export class IdentityManagement {
           nonce,
           now,
           new Date(now.getTime() + 900000),
+          transferPolicy,
         ],
       );
       await this.audit(a.humanIdentityId, "recovery.control.requested", id, {
@@ -695,7 +710,7 @@ export class IdentityManagement {
   }
   async authorizeOwnerAuthentication(token: SessionId, caseId?: string, kind: "recovery" | "compensation" = "recovery"): Promise<string> {
     const actor = await this.admin(token);
-    this.gate();
+    this.gateRecovery();
     if (!caseId) return actor.humanIdentityId;
     const now = this.clock.now();
     if (kind === "compensation") {
@@ -710,7 +725,7 @@ export class IdentityManagement {
     return c.target_human_identity_id;
   }
   async authenticateExistingOwnerApple<T>(token: SessionId, input: {caseId?: string; kind?: "recovery" | "compensation"}, work: (expectedHumanIdentityId: string) => Promise<T>): Promise<T> {
-    await this.admin(token); this.gate();
+    await this.admin(token); this.gateRecovery();
     return this.db.withIdentityManagementTransaction(async () => {
       const actor = await this.admin(token);
       const expected = await this.authorizeOwnerAuthentication(token, input.caseId, input.kind);
@@ -745,7 +760,7 @@ export class IdentityManagement {
     },
   ) {
     await this.admin(token, true);
-    this.gate();
+    this.gateRecovery();
     // Verify using configured issuer, signature and audience policy. Never accept caller-supplied subject or "verified" boolean.
     const actor = await this.admin(token, true);
     const loaded = await this.db.withTransaction(() =>
@@ -858,7 +873,7 @@ export class IdentityManagement {
   }
   /** Fresh Google OIDC proof controls the exact existing source; no source session or Human is created. */
   async proveNativeRecovery(token: SessionId, input: {caseId:string; targetSession:string; identityToken:string}, handoffId?: string) {
-    await this.admin(token, true); this.gate();
+    await this.admin(token, true); this.gateRecovery();
     const actor = await this.admin(token, true);
     const loaded = await this.db.withTransaction(()=>this.case(input.caseId,actor.humanIdentityId));
     let verified;
@@ -941,20 +956,20 @@ export class IdentityManagement {
     }
     if (source.lifecycle !== "active" || target.lifecycle !== "active")
       blockers.push("HUMAN_NOT_ACTIVE");
-    if (source.protectedIdentity) blockers.push("PROTECTED_SOURCE");
-    if (source.relationshipsPresent)
-      blockers.push("SOURCE_DEPENDENCIES_PRESENT");
-    if (source.unknownCoverage) blockers.push("SOURCE_DEPENDENCIES_UNKNOWN");
-    const methods = source.human.authenticationMethods.filter(
-      (x) => x.status === "active",
-    );
-    if (methods.length !== 1 || methods[0]?.method !== "google")
-      blockers.push("SOURCE_NOT_GOOGLE_ONLY");
-    // Historical credentials/relationships are retained and are also dependencies, not merely active methods.
-    if (source.human.authenticationMethods.length !== 1)
-      blockers.push("SOURCE_AUTHENTICATION_HISTORY");
-    if (target.human.authenticationMethods.some((x) => x.method === "google"))
-      blockers.push("TARGET_GOOGLE_RELATIONSHIP_EXISTS");
+    const retaining = c.transfer_policy === "retain_records";
+    const methods = source.human.authenticationMethods.filter(x=>x.status === "active");
+    const sourceWillLoseSignIn = !methods.some(x=>x.method !== "google");
+    if (!retaining) {
+      if (source.protectedIdentity) blockers.push("PROTECTED_SOURCE");
+      if (source.relationshipsPresent) blockers.push("SOURCE_DEPENDENCIES_PRESENT");
+      if (source.unknownCoverage) blockers.push("SOURCE_DEPENDENCIES_UNKNOWN");
+      if (methods.length !== 1 || methods[0]?.method !== "google") blockers.push("SOURCE_NOT_GOOGLE_ONLY");
+      if (source.human.authenticationMethods.length !== 1) blockers.push("SOURCE_AUTHENTICATION_HISTORY");
+    } else if (sourceWillLoseSignIn) {
+      blockers.push(...await continuityBlockers(this.db,c.source_human_identity_id));
+      if (source.products.some(p=>p.state === "verified" && (p.counts?.ownership ?? 0)>0)) blockers.push("EXTERNAL_OWNERSHIP_CONTINUITY_REQUIRED");
+    }
+    if (target.human.authenticationMethods.some(x=>x.method === "google" && (!retaining || x.status === "active"))) blockers.push("TARGET_GOOGLE_RELATIONSHIP_EXISTS");
     const targetMethods = target.human.authenticationMethods.filter(
       (x) => x.status === "active",
     );
@@ -975,6 +990,7 @@ export class IdentityManagement {
       source: source.reviewDigest,
       target: target.reviewDigest,
       proofExpiresAt: c.proof_expires_at,
+      transferPolicy: c.transfer_policy ?? "verified_empty_source",
     });
     return {
       caseId: c.id,
@@ -983,9 +999,10 @@ export class IdentityManagement {
       blockers,
       reviewDigest,
       proofExpiresAt: c.proof_expires_at?.toISOString(),
-      executionEnabled: this.executionEnabled,
+      executionEnabled: this.executionEnabled || this.recoveryEnabled,
       sessionImpact,
-      sourceWillLoseSignIn: true,
+      sourceWillLoseSignIn,
+      sourceDataPolicy: retaining ? "retain_records" : "verified_empty_source",
       plannedChanges: [
         "Move the verified Google relationship to the selected primary, retaining relationship ID and creation history",
         "Revoke every non-revoked source session; no target sessions are revoked",
@@ -1014,7 +1031,7 @@ export class IdentityManagement {
     },
   ) {
     await this.admin(token, true);
-    this.gate();
+    this.gateRecovery();
     return this.db.withIdentityManagementTransaction(async () => {
       const a = await this.admin(token, true),
         intent = digest(input);
@@ -1174,7 +1191,7 @@ export class IdentityManagement {
     return c;
   }
   async prepareCompensation(token:SessionId,originalRequestId:string) {
-    await this.admin(token,true); this.gate();
+    await this.admin(token,true); this.gateRecovery();
     return this.db.withIdentityManagementTransaction(async()=>{
       const a=await this.admin(token,true),receipt=await this.transferReceipt(originalRequestId,a.humanIdentityId),now=this.clock.now();
       if((await this.db.query("SELECT 1 FROM identity_recovery_compensations WHERE original_request_id=$1 AND state='completed'",[originalRequestId])).rows.length) reject('COMPENSATION_EXISTS','Review the existing compensation request.');
@@ -1187,7 +1204,7 @@ export class IdentityManagement {
     });
   }
   async proveCompensation(token:SessionId,input:{caseId:string;targetSession:string;identityToken:string},handoffId?:string) {
-    await this.admin(token,true);this.gate();
+    await this.admin(token,true);this.gateRecovery();
     const actor=await this.admin(token,true),loaded=await this.db.withTransaction(()=>this.compensation(input.caseId,actor.humanIdentityId));
     let verified;
     try { verified=await this.verifiers.verify(FederatedIdentityProvider.from('google'),{identityToken:input.identityToken,nonce:loaded.nonce}); }
@@ -1228,7 +1245,7 @@ export class IdentityManagement {
     if(!proofSessions.some(s=>digest(s.id.value)===c.target_session_hash&&s.status==='active'&&s.expiresAt>this.clock.now())) blockers.push('CONTROL_REVOKED');
     const originalProofs=(await this.db.query('SELECT human_identity_id FROM identity_management_control_proofs WHERE case_id=$1',[receipt.caseId])).rows;
     if(!originalProofs.some(p=>p.human_identity_id===receipt.sourceHumanIdentityId)||!originalProofs.some(p=>p.human_identity_id===receipt.targetHumanIdentityId)) blockers.push('ORIGINAL_CONTROL_HISTORY_MISSING');
-    return {caseId:c.id,originalRequestId:c.original_request_id,source,target,blockers,executionEnabled:this.executionEnabled,proofExpiresAt:c.proof_expires_at?.toISOString(),
+    return {caseId:c.id,originalRequestId:c.original_request_id,source,target,blockers,executionEnabled:this.executionEnabled || this.recoveryEnabled,proofExpiresAt:c.proof_expires_at?.toISOString(),
       affectedTargetSessionCount:target.nonRevokedSessionCount,
       plannedChanges:['Return only the receipt-bound Google relationship to its original Human','Revoke all current primary sessions because provider attribution is unavailable','Keep all previously revoked source sessions revoked; fresh authentication is required','Preserve both Humans, profiles, roles, participation, entitlements and all application data'],
       automaticRollback:false,
@@ -1239,7 +1256,7 @@ export class IdentityManagement {
       await this.audit(a.humanIdentityId,'recovery.compensation.previewed',caseId);return p;});
   }
   async executeCompensation(token:SessionId,input:{caseId:string;requestId:string;reviewDigest:string;confirmation:string;revokeTargetSessions:boolean;acceptFreshSignIn:boolean}) {
-    await this.admin(token,true);this.gate();
+    await this.admin(token,true);this.gateRecovery();
     return this.db.withIdentityManagementTransaction(async()=>{
       const a=await this.admin(token,true),intent=digest(input),prev=await this.previous(input.requestId,a.humanIdentityId,'google_compensation',intent);if(prev)return prev;
       const c=await this.compensation(input.caseId,a.humanIdentityId),p=await this.compensationPreview(c),receipt=await this.transferReceipt(c.original_request_id,a.humanIdentityId);

@@ -1,3 +1,5 @@
+import type { HumanIdentityRepository } from "../../identity/ports/human-identity-repository.js";
+import { AppError } from "../../shared/errors.js";
 import { createHmac } from "node:crypto";
 
 import type { ValidateSession } from "../../sessions/application/use-cases.js";
@@ -58,6 +60,9 @@ export class EmailPasswordSecurity {
     private readonly clock: Clock,
     private readonly options: EmailSecurityOptions,
     private readonly atomically: <T>(work: () => Promise<T>) => Promise<T> = async (work) => work(),
+    private readonly humans?: HumanIdentityRepository,
+    private readonly accountManagementEnabled = false,
+    private readonly auditLinkedEmail?: (humanIdentityId:string)=>Promise<void>,
   ) {
     this.apps = new Map(apps.map((app) => [app.id, app]));
     this.app(options.defaultAppId);
@@ -95,7 +100,9 @@ export class EmailPasswordSecurity {
     );
     if (credential === null || credential.emailVerified) return;
     if (!await this.rateLimit("resend_verification", credential.email.value, input.ipAddress)) return;
-    await this.issueAndSend(credential.id, credential.email.value, "verify_email", input.appId);
+    const pending = credential.status === "disabled" ? await this.challenges.findLatestForCredential?.(credential.id,"link_email") : null;
+    if (credential.status === "disabled" && (!pending || pending.consumedAt !== null || !this.accountManagementEnabled)) return;
+    await this.issueAndSend(credential.id, credential.email.value, pending ? "link_email" : "verify_email", input.appId);
   }
 
   async authenticationState(sessionId: string): Promise<EmailAuthenticationState> {
@@ -118,14 +125,21 @@ export class EmailPasswordSecurity {
       throw new EmailSecurityRateLimitError();
     }
     await this.atomically(async () => {
-      const challenge = await this.validChallenge(tokenHash, "verify_email");
+      const linking = await this.challenges.findByTokenHashForUpdate(tokenHash,"link_email");
+      if (linking && !this.accountManagementEnabled) throw new AppError("Account management is disabled", "ACCOUNT_MANAGEMENT_DISABLED",403);
+      const challenge = await this.validChallenge(tokenHash, linking ? "link_email" : "verify_email");
       const credential = await this.credentials.findById(challenge.credentialId);
       if (credential === null || credential.status === "retired") throw new EmailActionTokenError();
+      if (linking) {
+        if (credential.status !== "disabled" || (await this.humans?.findById(credential.humanIdentityId))?.status !== "active") throw new EmailActionTokenError();
+        credential.enable(this.clock);
+      }
       credential.markEmailVerified(this.clock);
       await this.credentials.save(credential);
+      if (linking) await this.auditLinkedEmail?.(credential.humanIdentityId.value);
       await this.challenges.consumeActiveForCredential(
         credential.id,
-        "verify_email",
+        challenge.purpose,
         this.clock.now(),
       );
     });
@@ -174,6 +188,13 @@ export class EmailPasswordSecurity {
     });
   }
 
+  async sendLinkVerification(credentialId: EmailActionChallenge["credentialId"], appId?: string): Promise<IdentityEmailDelivery> {
+    if (!this.accountManagementEnabled) throw new AppError("Account management is disabled","ACCOUNT_MANAGEMENT_DISABLED",403);
+    const credential=await this.credentials.findById(credentialId);
+    if (!credential || credential.status !== "disabled") throw new EmailActionTokenError();
+    return this.issueAndSend(credential.id,credential.email.value,"link_email",appId);
+  }
+
   private async issueAndSend(
     credentialId: EmailActionChallenge["credentialId"],
     email: string,
@@ -183,7 +204,7 @@ export class EmailPasswordSecurity {
     const app = this.app(appId);
     const generated = this.tokens.next();
     const createdAt = this.clock.now();
-    const ttlSeconds = purpose === "verify_email"
+    const ttlSeconds = purpose !== "reset_password"
       ? this.options.verificationTtlSeconds
       : this.options.passwordResetTtlSeconds;
     const challenge: EmailActionChallenge = {
@@ -197,7 +218,7 @@ export class EmailPasswordSecurity {
       consumedAt: null,
     };
     await this.atomically(() => this.challenges.replaceActive(challenge));
-    const path = purpose === "verify_email" ? "/auth/verify-email" : "/auth/reset-password";
+    const path = purpose !== "reset_password" ? "/auth/verify-email" : "/auth/reset-password";
     const link = `${app.baseUrl}${path}#token=${encodeURIComponent(generated.value)}`;
     const message = identityEmailTemplate(app.displayName, email, link, purpose, ttlSeconds);
     return this.emails.send(message);
@@ -263,7 +284,7 @@ function identityEmailTemplate(
   purpose: EmailActionPurpose,
   ttlSeconds: number,
 ): { to: string; subject: string; text: string; html: string } {
-  const verifying = purpose === "verify_email";
+  const verifying = purpose !== "reset_password";
   const heading = verifying ? "Confirm your email" : "Reset your password";
   const action = verifying ? "Confirm email" : "Reset password";
   const minutes = Math.max(1, Math.floor(ttlSeconds / 60));

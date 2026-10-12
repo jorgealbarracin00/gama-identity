@@ -1,6 +1,7 @@
+import { AccountManagement } from "../../src/authentication/application/account-management.js";
 import { IdentityExplorer } from "../../src/control-plane/application/identity-explorer.js";
 import { MemoryIdentityInspectionRepository } from "../../src/control-plane/adapters/memory-identity-inspection-repository.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { PasswordHasher, PasswordVerifier } from "../../src/authentication/credentials/ports/password-operations.js";
 import {
@@ -183,7 +184,7 @@ export class RecordingIdentityEmailService implements IdentityEmailService {
   }
 }
 
-export function buildTestServices(): {
+export function buildTestServices(options: { accountManagementEnabled?: boolean } = {}): {
   services: IdentityServices;
   clock: MutableClock;
   identities: InMemoryHumanIdentityRepository;
@@ -197,6 +198,7 @@ export function buildTestServices(): {
   workforceAdministration: WorkforceAdministration;
   platformAdministrationProvisioning: PlatformAdministrationProvisioning;
   emails: RecordingIdentityEmailService;
+  emailChallenges: InMemoryEmailActionChallengeRepository;
 } {
   const clock = new MutableClock(new Date("2026-01-01T00:00:00Z"));
   const identities = new InMemoryHumanIdentityRepository();
@@ -210,6 +212,7 @@ export function buildTestServices(): {
   const emailChallenges = new InMemoryEmailActionChallengeRepository();
   const securityAttempts = new InMemoryIdentitySecurityAttemptRepository();
   const emails = new RecordingIdentityEmailService();
+  const controlPlaneRepository = new InMemoryControlPlaneRepository();
   const passwords = new DeterministicPasswords();
   const identityIds = new IdentityIds();
   const createIdentity = new CreateHumanIdentity(
@@ -260,7 +263,10 @@ export function buildTestServices(): {
       rateLimitSecret: "test-rate-limit-secret-with-32-characters",
     },
     (work) => serial.execute(work),
+    identities,options.accountManagementEnabled ?? false,
+    human=>controlPlaneRepository.appendAudit({id:randomUUID(),actorReference:`human-identity:${human}`,subjectReference:`human-identity:${human}`,eventType:"authentication.email.connected",eventData:{},occurredAt:clock.now()}),
   );
+  const accountManagement = new AccountManagement(identities,sessions,credentials,federatedIdentities,emailChallenges,createCredential,emailPasswordSecurity,passwords,new BaselinePasswordPolicy(),controlPlaneRepository,clock,work=>serial.execute(work),options.accountManagementEnabled ?? false);
   const federatedVerifiers = new FederatedIdentityTokenVerifiers([appleVerifier, googleVerifier]);
   const authenticateFederated = new AuthenticateFederated(
     federatedVerifiers,
@@ -280,7 +286,6 @@ export function buildTestServices(): {
     clock,
     (work) => serial.execute(work),
   );
-  const controlPlaneRepository = new InMemoryControlPlaneRepository();
   const federatedAuthenticationMethods = new ManageFederatedAuthenticationMethods(
     new FederatedIdentityTokenVerifiers([appleVerifier, googleVerifier]),
     federatedIdentities,
@@ -353,6 +358,7 @@ export function buildTestServices(): {
     ),
     validateSession,
     emailPasswordSecurity,
+    accountManagement,
     controlPlane,
     administration,
   };
@@ -370,5 +376,6 @@ export function buildTestServices(): {
     workforceAdministration,
     platformAdministrationProvisioning,
     emails,
+    emailChallenges,
   };
 }

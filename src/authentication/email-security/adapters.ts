@@ -53,6 +53,11 @@ implements EmailActionChallengeRepository {
     return null;
   }
 
+  async findLatestForCredential(credentialId: EmailCredentialId, purpose: EmailActionPurpose): Promise<EmailActionChallenge | null> {
+    const found = [...this.challenges.values()].reverse().find(c => c.credentialId.equals(credentialId) && c.purpose === purpose);
+    return found ? copyChallenge(found) : null;
+  }
+
   async consumeActiveForCredential(
     credentialId: EmailCredentialId,
     purpose: EmailActionPurpose,

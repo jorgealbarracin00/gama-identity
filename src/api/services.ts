@@ -1,3 +1,6 @@
+import { HumanAdministration } from "../control-plane/application/human-administration.js";
+import { AccountManagement } from "../authentication/application/account-management.js";
+import { randomUUID } from "node:crypto";
 import { WorkloadAdministration } from "../control-plane/application/workload-administration.js";
 import { GoogleRecoveryHandoff } from "../control-plane/application/google-recovery-handoff.js";
 import { startGoogleRecoveryMaintenance } from "../control-plane/application/google-recovery-maintenance.js";
@@ -108,6 +111,7 @@ import type { ControlPlaneRepository } from "../control-plane/ports/control-plan
 import { SerialExecutor } from "../shared/serial-executor.js";
 
 export interface AdministrationServices {
+  readonly humans?: HumanAdministration;
   readonly workloads?: WorkloadAdministration;
   readonly controlCentre?: ConsoleControlCentre;
   readonly identityManagement?: IdentityManagement;
@@ -119,6 +123,7 @@ export interface AdministrationServices {
 }
 
 export interface IdentityServices {
+  readonly accountManagement?: AccountManagement;
   readonly groceryAppleRevocation?: { serviceToken: string; service: ProductAppleRevocation };
   readonly register: {
     execute(input: CredentialsInput): Promise<RegistrationResult>;
@@ -175,7 +180,7 @@ export async function buildRuntime(
       const code = (error as Error & { code?: string }).code;
       logger.error({ code }, "Unexpected idle PostgreSQL client error");
     },
-    syntheticManagementEnabled(runtimeConfig),
+    syntheticManagementEnabled(runtimeConfig) || runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED || runtimeConfig.IDENTITY_ACCOUNT_MANAGEMENT_ENABLED || runtimeConfig.IDENTITY_PROVIDER_TRANSFER_ENABLED,
   );
   try {
     await database.checkConnection();
@@ -262,10 +267,11 @@ export async function buildRuntime(
   // Ownership recovery never broadens the existing product-authentication audiences.
   const managementGoogleAudiences = runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB ? [runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB.clientId] : [];
   const identityManagement = new IdentityManagement(database,new PostgresControlCentreRepository(database),new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,identities,sessions,federatedIdentities,federatedNonces,
-          new FederatedIdentityTokenVerifiers([managementGoogleAudiences.length===0 ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER) : new GoogleIdentityTokenVerifier({clientIds:managementGoogleAudiences,maximumAuthenticationAgeSeconds:300})]),clock,syntheticManagementEnabled(runtimeConfig),controlPlane,syntheticManagementEnabled(runtimeConfig)?[]:["cashcast","grocery-master",...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId==="coco-web"?"coco-the-llama":app.appId==="cashcast-preview"?"cashcast":app.appId)]);
+          new FederatedIdentityTokenVerifiers([managementGoogleAudiences.length===0 ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER) : new GoogleIdentityTokenVerifier({clientIds:managementGoogleAudiences,maximumAuthenticationAgeSeconds:300})]),clock,syntheticManagementEnabled(runtimeConfig),controlPlane,syntheticManagementEnabled(runtimeConfig)?[]:["cashcast","grocery-master",...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId==="coco-web"?"coco-the-llama":app.appId==="cashcast-preview"?"cashcast":app.appId)],runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED,runtimeConfig.IDENTITY_PROVIDER_TRANSFER_ENABLED);
+  const humanAdministration = new HumanAdministration(database,identityManagement,sessions,identities,new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,controlPlane,clock,runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED);
   const googleRecoveryHandoff = new GoogleRecoveryHandoff(database,identityManagement,sessions,identities,new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,clock,runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB);
   const recoveryMaintenance = startGoogleRecoveryMaintenance(googleRecoveryHandoff,
-    identityManagement.executionEnabled && runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB !== undefined,
+    (identityManagement.executionEnabled || identityManagement.recoveryEnabled) && runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB !== undefined,
     () => { logger.warn("Recovery handoff maintenance failed; transient cleanup will retry"); });
   return {
     services: {
@@ -283,8 +289,9 @@ export async function buildRuntime(
       register: new TransactionalRegister(services.register, database),
       controlPlane,
       administration: { ...administration,
-        workloads: new WorkloadAdministration(database,controlPlaneRepository,createPasswordOperations(runtimeConfig),clock,runtimeConfig.IDENTITY_WORKLOAD_ADMINISTRATION_ENABLED),
+        workloads: new WorkloadAdministration(database,controlPlaneRepository,createPasswordOperations(runtimeConfig),clock,runtimeConfig.IDENTITY_WORKLOAD_ADMINISTRATION_ENABLED,runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED),
         identityManagement,
+        humans: humanAdministration,
         googleRecoveryHandoff,
         ...(googleVerification === undefined ? {} : { googleVerification }),
         controlCentre: new ConsoleControlCentre(new PostgresControlCentreRepository(database),
@@ -436,6 +443,7 @@ function composeServices(
   renewSession: RenewSession;
   validateSession: ValidateSession;
   emailPasswordSecurity: EmailPasswordSecurity;
+  accountManagement: AccountManagement;
 } {
   const passwordOperations = createPasswordOperations(runtimeConfig);
 
@@ -488,7 +496,11 @@ function composeServices(
       rateLimitSecret: runtimeConfig.IDENTITY_RATE_LIMIT_SECRET,
     },
     atomically,
+    identities,
+    runtimeConfig.IDENTITY_ACCOUNT_MANAGEMENT_ENABLED,
+    human => controlPlaneRepository.appendAudit({id:randomUUID(),actorReference:`human-identity:${human}`,subjectReference:`human-identity:${human}`,eventType:"authentication.email.connected",eventData:{},occurredAt:clock.now()}),
   );
+  const accountManagement = new AccountManagement(identities,sessions,credentials,federatedIdentities,emailChallenges,createCredential,emailPasswordSecurity,passwordOperations,new BaselinePasswordPolicy(),controlPlaneRepository,clock,atomically,runtimeConfig.IDENTITY_ACCOUNT_MANAGEMENT_ENABLED);
   const appleVerifier = runtimeConfig.APPLE_CLIENT_IDS.length === 0
     ? new UnavailableFederatedIdentityTokenVerifier(APPLE_FEDERATED_PROVIDER)
     : new AppleIdentityTokenVerifier({ clientIds: runtimeConfig.APPLE_CLIENT_IDS });
@@ -600,6 +612,7 @@ function composeServices(
     renewSession: new RenewSession(sessions, createSession, renewalTokens, clock, atomically),
     validateSession,
     emailPasswordSecurity,
+    accountManagement,
   };
 }
 

@@ -191,6 +191,8 @@ export class ControlPlane {
     const legacy = await this.repository.findWorkload(workloadId);
     const managed = await this.repository.findManagedWorkload?.(workloadId) ?? null;
     if (legacy && managed) return null;
+    // Legacy product credentials never inherit destructive cleanup authority.
+    if (capability === "human.data.cleanup" && !managed) return null;
     const workload = legacy ?? managed;
     if (!workload || !active(workload.status)) return null;
     if (managed && !managed.capabilities.some(scope => scope === capability)) return null;

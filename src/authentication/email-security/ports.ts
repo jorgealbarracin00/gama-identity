@@ -1,6 +1,6 @@
 import type { EmailCredentialId } from "../credentials/domain/email-credential-id.js";
 
-export type EmailActionPurpose = "verify_email" | "reset_password";
+export type EmailActionPurpose = "verify_email" | "reset_password" | "link_email";
 export type IdentitySecurityAction =
   | "registration"
   | "verify_email"
@@ -30,6 +30,8 @@ export interface EmailActionChallengeRepository {
     purpose: EmailActionPurpose,
     consumedAt: Date,
   ): Promise<void>;
+  /** Optional for older adapters; only an explicit link challenge can enable a pending method. */
+  findLatestForCredential?(credentialId: EmailCredentialId, purpose: EmailActionPurpose): Promise<EmailActionChallenge | null>;
   deleteStale(olderThan: Date): Promise<void>;
 }
 

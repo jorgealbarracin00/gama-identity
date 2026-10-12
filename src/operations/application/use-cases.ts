@@ -88,13 +88,13 @@ export class Login {
     private readonly atomically: <T>(work: () => Promise<T>) => Promise<T> = async work => work(),
   ) {}
 
-  async execute(input: CredentialsInput): Promise<CreatedSession> {
+  async execute(input: CredentialsInput, expectedHumanIdentityId?: string): Promise<CreatedSession> {
     return this.atomically(async () => {
     const result: AuthenticationResult = await this.authenticate.execute({
       email: input.email,
       plaintextPassword: input.password,
     });
-    if (result.outcome !== "success") {
+    if (result.outcome !== "success" || (expectedHumanIdentityId !== undefined && result.humanIdentityId.value !== expectedHumanIdentityId)) {
       throw new InvalidLoginError();
     }
     return this.createSession.execute(result.humanIdentityId, undefined, "email_password");

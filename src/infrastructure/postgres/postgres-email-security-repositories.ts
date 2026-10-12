@@ -73,6 +73,14 @@ implements EmailActionChallengeRepository {
     };
   }
 
+  async findLatestForCredential(credentialId: EmailCredentialId, purpose: EmailActionPurpose): Promise<EmailActionChallenge | null> {
+    const result = await this.database.query<ChallengeRow>(
+      `SELECT id,credential_id,app_id,purpose,token_hash,expires_at,consumed_at,created_at FROM email_action_challenges
+       WHERE credential_id=$1 AND purpose=$2 ORDER BY (consumed_at IS NULL) DESC,created_at DESC,id DESC LIMIT 1 FOR UPDATE`, [credentialId.value,purpose]);
+    const row=result.rows[0];
+    return row ? {id:row.id,credentialId:EmailCredentialId.from(row.credential_id),appId:row.app_id,purpose:row.purpose,tokenHash:row.token_hash,expiresAt:row.expires_at,consumedAt:row.consumed_at,createdAt:row.created_at} : null;
+  }
+
   async consumeActiveForCredential(
     credentialId: EmailCredentialId,
     purpose: EmailActionPurpose,

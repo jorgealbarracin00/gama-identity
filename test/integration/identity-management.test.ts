@@ -360,6 +360,32 @@ describe(
       await report(source);
       await report(target);
     });
+    it("Demo C: verified Google transfer retains nonempty source data and preserves primary Apple/Email", async () => {
+      const clock=new SystemClock();
+      const m=new IdentityManagement(db,new PostgresControlCentreRepository(db),new AdministrationPrincipals(plane,humans,runtime.controlPlane),plane,humans,sessions,federated,new PostgresFederatedAuthenticationNonceRepository(db),new FederatedIdentityTokenVerifiers([new GoogleIdentityTokenVerifier({clientIds:["synthetic-client"],maximumAuthenticationAgeSeconds:300,keyResolver:async()=>key.publicKey})]),clock,false,runtime.controlPlane,[],true,true);
+      await seedAppleOwner(target,"synthetic-primary-apple");
+      await db.query("UPDATE credentials SET email_verified_at=now() WHERE human_identity_id=$1",[target]);
+      await plane.saveTenant({id:"demo-business",displayName:"Synthetic shared business",status:"active"});
+      await plane.saveParticipation({tenantId:"demo-business",productId:"synthetic-product",status:"active"});
+      await plane.saveMembership({tenantId:"demo-business",humanIdentityId:source,tenantRole:"staff",status:"active",createdAt:new Date(),updatedAt:new Date()});
+      await plane.saveEntitlement({tenantId:"demo-business",productId:"synthetic-product",humanIdentityId:source,status:"active"});
+      await report(source,{...zero,localAccounts:4,permissions:2,retention:1});
+      const before=(await db.query("SELECT * FROM tenant_memberships WHERE human_identity_id=$1",[source])).rows;
+      const credentials=(await db.query("SELECT * FROM credentials WHERE human_identity_id=$1",[target])).rows;
+      const apple=(await db.query("SELECT * FROM federated_identities WHERE human_identity_id=$1 AND provider='apple'",[target])).rows;
+      const c=await m.prepareRecovery(token(),source,target,"retain_records");
+      const signed=await signGoogle();sourceSession=signed.session.sessionId;
+      targetSession=(await runtime.services.login.execute({email:"target@synthetic.example",password})).sessionId;
+      await m.proveRecovery(token(),{caseId:c.caseId,sourceSession,targetSession,identityToken:await jwt(c.nonce)});
+      const preview=await m.previewRecovery(token(),c.caseId);assert.deepEqual(preview.blockers,[]);assert.equal(preview.sourceWillLoseSignIn,true);
+      await m.executeRecovery(token(),{caseId:c.caseId,requestId:randomUUID(),reviewDigest:preview.reviewDigest,confirmation:`transfer google ${source} to ${target}`,revokeSourceSessions:true,acceptSourceLossOfAccess:true});
+      assert.deepEqual((await db.query("SELECT * FROM tenant_memberships WHERE human_identity_id=$1",[source])).rows,before);
+      assert.deepEqual((await db.query("SELECT * FROM credentials WHERE human_identity_id=$1",[target])).rows,credentials);
+      assert.deepEqual((await db.query("SELECT * FROM federated_identities WHERE human_identity_id=$1 AND provider='apple'",[target])).rows,apple);
+      assert.equal((await signGoogle()).humanIdentityId,target);
+      assert.equal((await db.query("SELECT status FROM human_identities WHERE id=$1",[source])).rows[0]!.status,"active");
+      assert.equal((await db.query("SELECT status FROM sessions WHERE id=$1",[sourceSession])).rows[0]!.status,"revoked");
+    });
     it("assigns/unmarks purpose with audit, optimistic revisions and idempotent request binding", async () => {
       const input = {
         humanIdentityId: source,

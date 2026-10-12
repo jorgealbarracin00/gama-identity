@@ -146,7 +146,8 @@ export const COCO_DEVELOPMENT_TENANT_ID = "coco-development";
 export const MANAGED_WORKLOAD_CAPABILITIES = [
   "workload.context.read", "human.participation.register", "human.participation.backfill.preview",
 ] as const;
-export type ManagedWorkloadCapability = (typeof MANAGED_WORKLOAD_CAPABILITIES)[number];
+export const HUMAN_DATA_CLEANUP_CAPABILITY = "human.data.cleanup" as const;
+export type ManagedWorkloadCapability = (typeof MANAGED_WORKLOAD_CAPABILITIES)[number] | typeof HUMAN_DATA_CLEANUP_CAPABILITY;
 export type WorkloadCapability = ManagedWorkloadCapability | "team.manage" | "identity.dependencies.report";
 export interface ManagedProductWorkload extends ProductWorkload {
   readonly revision: number;

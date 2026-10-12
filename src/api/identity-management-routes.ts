@@ -121,6 +121,7 @@ export function identityManagementRoutes(
               sourceHumanIdentityId: human,
               targetHumanIdentityId: human,
               provider: z.literal("google"),
+              transferPolicy: z.enum(["verified_empty_source","retain_records"]).optional(),
             })
             .strict(),
           r.body,
@@ -129,6 +130,7 @@ export function identityManagementRoutes(
           s,
           p.sourceHumanIdentityId,
           p.targetHumanIdentityId,
+          p.transferPolicy,
         );
       },
       "recovery/prove": (m, s, r) =>

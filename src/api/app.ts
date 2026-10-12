@@ -1,3 +1,5 @@
+import { humanAdministrationRoutes } from "./human-administration-routes.js";
+import { accountManagementRoutes } from "./account-management-routes.js";
 import { workloadAdministrationRoutes } from "./workload-administration-routes.js";
 import { googleRecoveryHandoffRoutes } from "./google-recovery-handoff-routes.js";
 import { identityManagementRoutes } from './identity-management-routes.js';
@@ -32,6 +34,8 @@ export function buildApp(
   setErrorHandler(app);
   app.register(healthRoutes(new HealthCheck(databaseHealth)));
   app.register(identityRoutes(services));
+  app.register(accountManagementRoutes(services));
+  app.register(humanAdministrationRoutes(services));
   app.register(controlPlaneRoutes(services, controlPlane));
   app.register(administrationRoutes(services));
   app.register(workloadAdministrationRoutes(services));
