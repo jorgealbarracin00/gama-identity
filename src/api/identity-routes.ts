@@ -462,11 +462,12 @@ function translateAuthenticationMethodsError(error: unknown): Error {
   if (error.code.startsWith("SESSION_")) {
     return new AppError("Session is not authenticated", error.code, 401);
   }
+  if (error.code === "REAUTHENTICATION_REQUIRED") return new AppError("Sign in again before changing a method",error.code,403);
   if (error.code === "IDENTITY_UNAVAILABLE") {
     return new AppError("The Human Identity is unavailable", error.code, 403);
   }
   if (error.code === "FEDERATED_IDENTITY_LINK_CONFLICT") {
-    return new AppError("A different provider identity is already connected", error.code, 409);
+    return new AppError("This provider is already connected to an account. Keep accounts separate, or use a separately verified transfer", error.code, 409);
   }
   if (error.code === "FEDERATED_IDENTITY_RECONCILIATION_REQUIRED") {
     return new AppError("This provider identity belongs to another account and cannot be safely reconciled", error.code, 409);

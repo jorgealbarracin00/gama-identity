@@ -12,7 +12,6 @@ import type { Clock } from "../../../shared/clock.js";
 import {
   FederatedIdentity,
   FederatedIdentityProvider,
-  type FederatedProviderMetadata,
 } from "../domain/federated-identity.js";
 import type { FederatedIdentityIdGenerator } from "../domain/federated-identity-id.js";
 import type {
@@ -33,7 +32,8 @@ export type FederatedAuthenticationMethodErrorCode =
   | "IDENTITY_UNAVAILABLE"
   | "FEDERATED_IDENTITY_LINK_CONFLICT"
   | "FEDERATED_IDENTITY_RECONCILIATION_REQUIRED"
-  | "LAST_AUTHENTICATION_METHOD";
+  | "LAST_AUTHENTICATION_METHOD"
+  | "REAUTHENTICATION_REQUIRED";
 
 export class FederatedAuthenticationMethodError extends Error {
   constructor(readonly code: FederatedAuthenticationMethodErrorCode) {
@@ -72,6 +72,7 @@ export interface FederatedLinkResult {
 }
 
 export interface FederatedUnlinkResult {
+  readonly reauthenticationRequired: boolean;
   readonly outcome: "unlinked" | "already_unlinked";
   readonly humanIdentityId: string;
   readonly methods: AuthenticationMethodsProjection;
@@ -112,7 +113,7 @@ export class ManageFederatedAuthenticationMethods {
   ): Promise<FederatedLinkResult> {
     // Reject an unusable caller session before asking an external provider verifier
     // to do work. The session is checked again in the mutation transaction.
-    await this.atomically(() => this.authenticatedSession(sessionId, true, expectedHumanIdentityId));
+    const actor = await this.atomically(() => this.authenticatedSession(sessionId, true, expectedHumanIdentityId));
 
     let provider: FederatedIdentityProvider;
     try {
@@ -127,10 +128,21 @@ export class ManageFederatedAuthenticationMethods {
       throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_LINK_CONFLICT");
     }
 
+    // Consume verified proof in its own transaction. A conflict must not roll
+    // replay protection back along with the declined relationship mutation.
+    await this.atomically(async () => {
+      await this.authenticatedSession(sessionId,true,expectedHumanIdentityId);
+      if (!await this.nonces.consume(verified.provider,verified.nonceHash,verified.expiresAt,this.clock.now())) {
+        throw new FederatedAuthenticationError("CREDENTIAL_REPLAYED");
+      }
+    });
     try {
       return await this.atomically(() => this.completeLink(sessionId, verified, expectedHumanIdentityId));
     } catch (error) {
-      if (error instanceof FederatedIdentityHumanProviderConflictError) {
+      if (error instanceof FederatedIdentityHumanProviderConflictError ||
+        error instanceof FederatedAuthenticationMethodError && error.code === "FEDERATED_IDENTITY_LINK_CONFLICT") {
+        await this.atomically(() => this.appendAudit("authentication.method.link_conflict",actor.humanIdentityId.value,
+          `human-identity:${actor.humanIdentityId.value}`,{provider:provider.value}));
         throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_LINK_CONFLICT");
       }
       throw error;
@@ -146,7 +158,7 @@ export class ManageFederatedAuthenticationMethods {
     }
 
     return this.atomically(async () => {
-      const session = await this.authenticatedSession(sessionId);
+      const session = await this.authenticatedSession(sessionId, true);
       await this.federatedIdentities.lockHumanProvider(session.humanIdentityId, provider);
       let relationship = await this.federatedIdentities.findActiveByHumanIdentityAndProvider(
         session.humanIdentityId,
@@ -155,6 +167,7 @@ export class ManageFederatedAuthenticationMethods {
       if (relationship === null) {
         return {
           outcome: "already_unlinked",
+          reauthenticationRequired: false,
           humanIdentityId: session.humanIdentityId.value,
           methods: await this.project(session.humanIdentityId),
         };
@@ -168,13 +181,14 @@ export class ManageFederatedAuthenticationMethods {
       if (relationship === null) {
         return {
           outcome: "already_unlinked",
+          reauthenticationRequired: false,
           humanIdentityId: session.humanIdentityId.value,
           methods: await this.project(session.humanIdentityId),
         };
       }
 
       const activeCredential = (await this.credentials.listByHumanIdentityId(session.humanIdentityId))
-        .some((credential) => credential.status === "active");
+        .some((credential) => credential.status === "active" && credential.emailVerified);
       const activeOtherFederated = (await this.federatedIdentities.listByHumanIdentityId(session.humanIdentityId))
         .some((candidate) => candidate.status === "active" && !candidate.id.equals(relationship!.id));
       if (!activeCredential && !activeOtherFederated) {
@@ -189,8 +203,16 @@ export class ManageFederatedAuthenticationMethods {
         `federated-identity:${relationship.id.value}`,
         { provider: provider.value, outcome: "unlinked" },
       );
+      let reauthenticationRequired=false;
+      for (const candidate of await this.sessions.listByHumanIdentityId(session.humanIdentityId)) {
+        if (candidate.authenticationMethod === provider.value || candidate.authenticationMethod === null) {
+          await this.sessions.revoke(candidate.id);
+          if (candidate.id.equals(sessionId)) reauthenticationRequired=true;
+        }
+      }
       return {
         outcome: "unlinked",
+        reauthenticationRequired,
         humanIdentityId: session.humanIdentityId.value,
         methods: await this.project(session.humanIdentityId),
       };
@@ -204,14 +226,6 @@ export class ManageFederatedAuthenticationMethods {
   ): Promise<FederatedLinkResult> {
     const session = await this.authenticatedSession(sessionId, true, expectedHumanIdentityId);
     const targetHumanIdentityId = session.humanIdentityId;
-    const consumed = await this.nonces.consume(
-      verified.provider,
-      verified.nonceHash,
-      verified.expiresAt,
-      this.clock.now(),
-    );
-    if (!consumed) throw new FederatedAuthenticationError("CREDENTIAL_REPLAYED");
-
     await this.federatedIdentities.lockHumanProvider(targetHumanIdentityId, verified.provider);
     await this.federatedIdentities.lockProviderSubject(verified.provider, verified.providerSubject);
 
@@ -263,70 +277,10 @@ export class ManageFederatedAuthenticationMethods {
       throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_LINK_CONFLICT");
     }
 
-    if (this.linkPolicy?.allowReconciliation === false) {
-      throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_LINK_CONFLICT");
-    }
-
-    await this.reconcilePristineFederatedOnlyHuman(
-      targetHumanIdentityId,
-      subjectRelationship,
-      verified.metadata,
-    );
-    await this.appendLinkedAudit(targetHumanIdentityId, subjectRelationship.id.value, verified.provider.value, "reconciled");
-    return this.linkResult("reconciled", targetHumanIdentityId);
-  }
-
-  private async reconcilePristineFederatedOnlyHuman(
-    targetHumanIdentityId: HumanIdentityId,
-    relationship: FederatedIdentity,
-    verifiedMetadata: FederatedProviderMetadata,
-  ): Promise<void> {
-    const sourceHumanIdentityId = relationship.humanIdentityId;
-    const sourceHuman = await this.humanIdentities.findById(sourceHumanIdentityId);
-    if (sourceHuman?.status !== "active") {
-      throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_RECONCILIATION_REQUIRED");
-    }
-
-    const [credentials, federated, sessions, platformMembership, memberships, entitlements] = await Promise.all([
-      this.credentials.listByHumanIdentityId(sourceHumanIdentityId),
-      this.federatedIdentities.listByHumanIdentityId(sourceHumanIdentityId),
-      this.sessions.listByHumanIdentityId(sourceHumanIdentityId),
-      this.controlPlane.findPlatformAdministrationMembership(sourceHumanIdentityId.value),
-      this.controlPlane.listMembershipsForHuman(sourceHumanIdentityId.value),
-      this.controlPlane.listEntitlementsForHumanAcrossTenants(sourceHumanIdentityId.value),
-    ]);
-    const hasLiveSession = sessions.some((candidate) =>
-      candidate.status === "active" && candidate.expiresAt.getTime() > this.clock.now().getTime());
-    const isOnlyRelationship = federated.length === 1 && federated[0]?.id.equals(relationship.id) === true;
-    if (
-      credentials.length !== 0 ||
-      !isOnlyRelationship ||
-      hasLiveSession ||
-      platformMembership !== null ||
-      memberships.length !== 0 ||
-      entitlements.length !== 0
-    ) {
-      throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_RECONCILIATION_REQUIRED");
-    }
-
-    for (const sourceSession of sessions) await this.sessions.revoke(sourceSession.id);
-    relationship.reassignTo(targetHumanIdentityId, this.clock);
-    relationship.recordVerifiedMetadata(verifiedMetadata, this.clock);
-    relationship.activate(this.clock);
-    await this.federatedIdentities.save(relationship);
-    sourceHuman.retire(this.clock);
-    await this.humanIdentities.save(sourceHuman);
-    await this.appendAudit(
-      "authentication.identity.reconciled",
-      targetHumanIdentityId.value,
-      `human:${sourceHumanIdentityId.value}`,
-      {
-        provider: relationship.provider.value,
-        outcome: "retired_pristine_federated_only_duplicate",
-        sourceHumanIdentityId: sourceHumanIdentityId.value,
-        targetHumanIdentityId: targetHumanIdentityId.value,
-      },
-    );
+    // A proved provider owned by another Human is a conflict, even if that
+    // account looks disposable. Explicit Connect never transfers or retires.
+    // Verified, separately confirmed transfer is handled by identity recovery.
+    throw new FederatedAuthenticationMethodError("FEDERATED_IDENTITY_LINK_CONFLICT");
   }
 
   private async authenticatedSession(
@@ -335,7 +289,7 @@ export class ManageFederatedAuthenticationMethods {
     expectedHumanIdentityId?: HumanIdentityId,
   ): Promise<Session> {
     const scopedLink = forLink && this.linkPolicy !== undefined;
-    const session = scopedLink
+    const session = forLink
       ? await this.sessions.findByIdForUpdate(sessionId)
       : await this.sessions.findById(sessionId);
     if (session === null) throw new FederatedAuthenticationMethodError("SESSION_INVALID");
@@ -349,6 +303,10 @@ export class ManageFederatedAuthenticationMethods {
     if (!session.validate(this.clock)) {
       if (!scopedLink) await this.sessions.save(session);
       throw new FederatedAuthenticationMethodError("SESSION_EXPIRED");
+    }
+    if (forLink) {
+      const age=this.clock.now().getTime()-session.authenticatedAt.getTime();
+      if (age<0 || age>300000) throw new FederatedAuthenticationMethodError("REAUTHENTICATION_REQUIRED");
     }
     const humanIdentity = await this.humanIdentities.findById(session.humanIdentityId);
     if (humanIdentity?.status !== "active") {

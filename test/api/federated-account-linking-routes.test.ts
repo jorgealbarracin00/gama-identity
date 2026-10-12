@@ -140,7 +140,7 @@ describe("authenticated federated account linking HTTP boundary", () => {
     fixture.appleVerifier.accept("canonical-conflict", { subject: "meaningful-subject" });
     const conflict = await link(app, canonical.sessionId, "canonical-conflict", "canonical-conflict");
     assert.equal(conflict.statusCode, 409);
-    assert.equal(conflict.json().error.code, "FEDERATED_IDENTITY_RECONCILIATION_REQUIRED");
+    assert.equal(conflict.json().error.code, "FEDERATED_IDENTITY_LINK_CONFLICT");
   });
 
   it("rejects caller-selected identity data and a different Apple subject for an already-linked Human", async () => {
@@ -172,7 +172,7 @@ describe("authenticated federated account linking HTTP boundary", () => {
     assert.equal(fixture.federatedIdentities.count, 1);
   });
 
-  it("reconciles only a signed-out pristine Apple-only duplicate and records redacted audit evidence", async () => {
+  it("keeps even a signed-out pristine Apple-only Human separate and audits the conflict", async () => {
     const fixture = buildTestServices();
     app = buildApp(fixture.services);
     const canonical = await register(app);
@@ -188,27 +188,27 @@ describe("authenticated federated account linking HTTP boundary", () => {
     fixture.appleVerifier.accept("blocked-link", { subject: "duplicate-subject" });
     const activeConflict = await link(app, canonical.sessionId, "blocked-link", "blocked");
     assert.equal(activeConflict.statusCode, 409);
-    assert.equal(activeConflict.json().error.code, "FEDERATED_IDENTITY_RECONCILIATION_REQUIRED");
+    assert.equal(activeConflict.json().error.code, "FEDERATED_IDENTITY_LINK_CONFLICT");
 
     await app.inject({ method: "POST", url: "/logout", headers: bearer(duplicateSessionId) });
     fixture.appleVerifier.accept("reconcile-link", { subject: "duplicate-subject" });
     const reconciled = await link(app, canonical.sessionId, "reconcile-link", "reconcile");
-    assert.equal(reconciled.statusCode, 200);
-    assert.equal(reconciled.json().outcome, "reconciled");
-    assert.equal(reconciled.json().humanIdentityId, canonical.humanIdentityId);
+    assert.equal(reconciled.statusCode, 409);
+    assert.equal(reconciled.json().error.code, "FEDERATED_IDENTITY_LINK_CONFLICT");
+    assert.equal(reconciled.body.includes(duplicateHumanIdentityId),false);
 
     const duplicate = await fixture.identities.findById(HumanIdentityId.from(duplicateHumanIdentityId));
-    assert.equal(duplicate?.status, "retired");
+    assert.equal(duplicate?.status, "active");
     const relationship = await fixture.federatedIdentities.findByProviderSubject(
       FederatedIdentityProvider.from("apple"),
       FederatedProviderSubject.from("duplicate-subject"),
     );
-    assert.equal(relationship?.humanIdentityId.value, canonical.humanIdentityId);
+    assert.equal(relationship?.humanIdentityId.value, duplicateHumanIdentityId);
     assert.equal(fixture.federatedIdentities.count, 1);
 
     const auditText = JSON.stringify(fixture.controlPlaneRepository.auditEvents);
-    assert.match(auditText, /authentication\.identity\.reconciled/);
-    assert.match(auditText, /authentication\.method\.linked/);
+    assert.doesNotMatch(auditText, /authentication\.identity\.reconciled/);
+    assert.match(auditText, /authentication\.method\.link_conflict/);
     assert.doesNotMatch(auditText, /duplicate-subject|duplicate-login|reconcile-link|linking_nonce/);
   });
 
@@ -237,7 +237,7 @@ describe("authenticated federated account linking HTTP boundary", () => {
     fixture.appleVerifier.accept("authority-link", { subject: "authority-subject" });
     const conflict = await link(app, canonical.sessionId, "authority-link", "authority-link");
     assert.equal(conflict.statusCode, 409);
-    assert.equal(conflict.json().error.code, "FEDERATED_IDENTITY_RECONCILIATION_REQUIRED");
+    assert.equal(conflict.json().error.code, "FEDERATED_IDENTITY_LINK_CONFLICT");
     assert.equal((await fixture.identities.findById(HumanIdentityId.from(duplicateHumanIdentityId)))?.status, "active");
   });
 
@@ -285,8 +285,8 @@ describe("authenticated federated account linking HTTP boundary", () => {
 
     fixture.appleVerifier.accept("authority-reconcile", { subject: "authority-duplicate-subject" });
     const reconciled = await link(app, canonical.sessionId, "authority-reconcile", "authority-reconcile");
-    assert.equal(reconciled.statusCode, 200);
-    assert.equal(reconciled.json().outcome, "reconciled");
+    assert.equal(reconciled.statusCode, 409);
+    assert.equal(reconciled.json().error.code, "FEDERATED_IDENTITY_LINK_CONFLICT");
     assert.equal((await fixture.controlPlaneRepository.findPlatformAdministrationMembership(canonical.humanIdentityId))?.platformRole, "administrator");
     assert.deepEqual(
       await fixture.controlPlaneRepository.findMembership("coco-development", canonical.humanIdentityId),
@@ -310,7 +310,7 @@ describe("authenticated federated account linking HTTP boundary", () => {
     assert.deepEqual(await fixture.controlPlaneRepository.listEntitlementsForHumanAcrossTenants(duplicateHumanIdentityId), []);
   });
 
-  it("revokes stale duplicate sessions while retiring a reconciled Human", async () => {
+  it("does not revoke another Human's stale sessions or retire it during Connect", async () => {
     const fixture = buildTestServices();
     app = buildApp(fixture.services);
     fixture.appleVerifier.accept("stale-duplicate-login", { subject: "stale-duplicate-subject" });
@@ -328,12 +328,12 @@ describe("authenticated federated account linking HTTP boundary", () => {
     });
 
     const reconciled = await link(app, canonical.sessionId, "stale-duplicate-reconcile", "stale-duplicate-reconcile");
-    assert.equal(reconciled.statusCode, 200);
-    assert.equal(reconciled.json().outcome, "reconciled");
-    assert.equal((await fixture.sessions.findById(SessionId.from(duplicateSessionId)))?.status, "revoked");
+    assert.equal(reconciled.statusCode, 409);
+    assert.equal(reconciled.json().error.code, "FEDERATED_IDENTITY_LINK_CONFLICT");
+    assert.equal((await fixture.sessions.findById(SessionId.from(duplicateSessionId)))?.status, "active");
   });
 
-  it("serializes concurrent linking, duplicate reconciliation, and login races without duplicate subjects", async () => {
+  it("serializes concurrent linking, conflicts, and independent login races without duplicate subjects", async () => {
     const fixture = buildTestServices();
     app = buildApp(fixture.services);
     const sameHuman = await register(app, "same-human@example.com");
@@ -381,7 +381,7 @@ describe("authenticated federated account linking HTTP boundary", () => {
       assert.equal(racedRelationship?.humanIdentityId.value, raceHuman.humanIdentityId);
       assert.equal(loginRace.json().session.humanIdentityId, raceHuman.humanIdentityId);
     } else {
-      assert.equal(linkRace.json().error.code, "FEDERATED_IDENTITY_RECONCILIATION_REQUIRED");
+      assert.equal(linkRace.json().error.code, "FEDERATED_IDENTITY_LINK_CONFLICT");
       assert.equal(racedRelationship?.humanIdentityId.value, loginRace.json().session.humanIdentityId);
     }
 
@@ -406,8 +406,8 @@ describe("authenticated federated account linking HTTP boundary", () => {
       link(duplicateApp, canonical.sessionId, "duplicate-race-two", "duplicate-race-two"),
     ]);
     assert.deepEqual(
-      reconciliationRace.map((response) => response.json().outcome).sort(),
-      ["already_linked", "reconciled"],
+      reconciliationRace.map((response) => response.statusCode).sort(),
+      [409, 409],
     );
     assert.equal(duplicateFixture.federatedIdentities.count, 1);
     await duplicateApp.close();
@@ -417,6 +417,8 @@ describe("authenticated federated account linking HTTP boundary", () => {
     const fixture = buildTestServices();
     app = buildApp(fixture.services);
     const emailHuman = await register(app);
+    const verifiedEmail=(await fixture.credentials.findByHumanIdentityId(HumanIdentityId.from(emailHuman.humanIdentityId)))!;
+    verifiedEmail.markEmailVerified(fixture.clock);await fixture.credentials.save(verifiedEmail);
     fixture.appleVerifier.accept("email-link", { subject: "unlinkable-subject" });
     await link(app, emailHuman.sessionId, "email-link", "email-link");
     const unlinked = await app.inject({
@@ -427,6 +429,8 @@ describe("authenticated federated account linking HTTP boundary", () => {
     assert.equal(unlinked.statusCode, 200);
     assert.equal(unlinked.json().outcome, "unlinked");
     assert.equal(unlinked.json().methods.federated.length, 0);
+    assert.equal(unlinked.json().reauthenticationRequired,false); // proved Email session remains usable
+    assert.equal((await fixture.sessions.findById(SessionId.from(emailHuman.sessionId)))?.status,"active");
 
     fixture.appleVerifier.accept("apple-only-login", { subject: "last-method-subject" });
     const appleOnly = await app.inject({
