@@ -1,3 +1,4 @@
+import { humanCapabilities, accountCapabilities, anyHumanCapability, recordCapabilityConfiguration } from "../control-plane/application/administrative-capabilities.js";
 import { HumanAdministration } from "../control-plane/application/human-administration.js";
 import { AccountManagement } from "../authentication/application/account-management.js";
 import { randomUUID } from "node:crypto";
@@ -180,11 +181,12 @@ export async function buildRuntime(
       const code = (error as Error & { code?: string }).code;
       logger.error({ code }, "Unexpected idle PostgreSQL client error");
     },
-    syntheticManagementEnabled(runtimeConfig) || runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED || runtimeConfig.IDENTITY_ACCOUNT_MANAGEMENT_ENABLED || runtimeConfig.IDENTITY_PROVIDER_TRANSFER_ENABLED,
+    syntheticManagementEnabled(runtimeConfig) || anyHumanCapability(humanCapabilities(runtimeConfig)) || (accountCapabilities(runtimeConfig).emailConnect || accountCapabilities(runtimeConfig).emailUnlink || accountCapabilities(runtimeConfig).passwordChange) || runtimeConfig.IDENTITY_PROVIDER_TRANSFER_ENABLED,
   );
   try {
     await database.checkConnection();
     await runMigrations(database);
+    await recordCapabilityConfiguration(database, runtimeConfig);
   } catch (error) {
     await database.close();
     throw error;
@@ -267,8 +269,8 @@ export async function buildRuntime(
   // Ownership recovery never broadens the existing product-authentication audiences.
   const managementGoogleAudiences = runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB ? [runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB.clientId] : [];
   const identityManagement = new IdentityManagement(database,new PostgresControlCentreRepository(database),new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,identities,sessions,federatedIdentities,federatedNonces,
-          new FederatedIdentityTokenVerifiers([managementGoogleAudiences.length===0 ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER) : new GoogleIdentityTokenVerifier({clientIds:managementGoogleAudiences,maximumAuthenticationAgeSeconds:300})]),clock,syntheticManagementEnabled(runtimeConfig),controlPlane,syntheticManagementEnabled(runtimeConfig)?[]:["cashcast","grocery-master",...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId==="coco-web"?"coco-the-llama":app.appId==="cashcast-preview"?"cashcast":app.appId)],runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED,runtimeConfig.IDENTITY_PROVIDER_TRANSFER_ENABLED);
-  const humanAdministration = new HumanAdministration(database,identityManagement,sessions,identities,new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,controlPlane,clock,runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED);
+          new FederatedIdentityTokenVerifiers([managementGoogleAudiences.length===0 ? new UnavailableFederatedIdentityTokenVerifier(GOOGLE_FEDERATED_PROVIDER) : new GoogleIdentityTokenVerifier({clientIds:managementGoogleAudiences,maximumAuthenticationAgeSeconds:300})]),clock,syntheticManagementEnabled(runtimeConfig),controlPlane,syntheticManagementEnabled(runtimeConfig)?[]:["cashcast","grocery-master",...runtimeConfig.IDENTITY_WEB_APPS.map(app=>app.appId==="coco-web"?"coco-the-llama":app.appId==="cashcast-preview"?"cashcast":app.appId)],runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED,runtimeConfig.IDENTITY_PROVIDER_TRANSFER_ENABLED,humanCapabilities(runtimeConfig));
+  const humanAdministration = new HumanAdministration(database,identityManagement,sessions,identities,new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,controlPlane,clock,runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED,humanCapabilities(runtimeConfig));
   const googleRecoveryHandoff = new GoogleRecoveryHandoff(database,identityManagement,sessions,identities,new AdministrationPrincipals(controlPlaneRepository,identities,controlPlane),controlPlaneRepository,clock,runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB);
   const recoveryMaintenance = startGoogleRecoveryMaintenance(googleRecoveryHandoff,
     (identityManagement.executionEnabled || identityManagement.recoveryEnabled) && runtimeConfig.IDENTITY_RECOVERY_GOOGLE_WEB !== undefined,
@@ -289,7 +291,7 @@ export async function buildRuntime(
       register: new TransactionalRegister(services.register, database),
       controlPlane,
       administration: { ...administration,
-        workloads: new WorkloadAdministration(database,controlPlaneRepository,createPasswordOperations(runtimeConfig),clock,runtimeConfig.IDENTITY_WORKLOAD_ADMINISTRATION_ENABLED,runtimeConfig.IDENTITY_HUMAN_ADMINISTRATION_ENABLED),
+        workloads: new WorkloadAdministration(database,controlPlaneRepository,createPasswordOperations(runtimeConfig),clock,runtimeConfig.IDENTITY_WORKLOAD_ADMINISTRATION_ENABLED,humanCapabilities(runtimeConfig).delete),
         identityManagement,
         humans: humanAdministration,
         googleRecoveryHandoff,
@@ -497,10 +499,10 @@ function composeServices(
     },
     atomically,
     identities,
-    runtimeConfig.IDENTITY_ACCOUNT_MANAGEMENT_ENABLED,
+    accountCapabilities(runtimeConfig).emailConnect,
     human => controlPlaneRepository.appendAudit({id:randomUUID(),actorReference:`human-identity:${human}`,subjectReference:`human-identity:${human}`,eventType:"authentication.email.connected",eventData:{},occurredAt:clock.now()}),
   );
-  const accountManagement = new AccountManagement(identities,sessions,credentials,federatedIdentities,emailChallenges,createCredential,emailPasswordSecurity,passwordOperations,new BaselinePasswordPolicy(),controlPlaneRepository,clock,atomically,runtimeConfig.IDENTITY_ACCOUNT_MANAGEMENT_ENABLED);
+  const accountManagement = new AccountManagement(identities,sessions,credentials,federatedIdentities,emailChallenges,createCredential,emailPasswordSecurity,passwordOperations,new BaselinePasswordPolicy(),controlPlaneRepository,clock,atomically,runtimeConfig.IDENTITY_ACCOUNT_MANAGEMENT_ENABLED,accountCapabilities(runtimeConfig));
   const appleVerifier = runtimeConfig.APPLE_CLIENT_IDS.length === 0
     ? new UnavailableFederatedIdentityTokenVerifier(APPLE_FEDERATED_PROVIDER)
     : new AppleIdentityTokenVerifier({ clientIds: runtimeConfig.APPLE_CLIENT_IDS });

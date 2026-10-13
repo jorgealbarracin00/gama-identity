@@ -5,11 +5,12 @@ import {loadConfig} from '../../src/config/env.js';
 import {PostgresDatabase} from '../../src/infrastructure/postgres/database.js';
 import {PostgresControlPlaneRepository} from '../../src/infrastructure/postgres/postgres-control-plane-repository.js';
 import {consoleFixtureDatabaseAllowed} from './console-ui-fixture-safety.js';
+const partialUI=process.env.GAMA_CONSOLE_ACTIVATION_PARTIAL_UI_TESTING==='1';
 const accountUI=process.env.GAMA_CONSOLE_ACCOUNT_UI_TESTING==='1';
 const managementUI=process.env.GAMA_CONSOLE_MANAGEMENT_UI_TESTING==='1'||accountUI;
 const url=process.env.POSTGRES_CONSOLE_UI_DATABASE_URL;
 if(!consoleFixtureDatabaseAllowed(url,managementUI)||!url)throw new Error('Local fixture database required');
-const runtime=await buildRuntime(loadConfig({...(managementUI?{NODE_ENV:'test'}:{}),REPOSITORY_MODE:'postgres',DATABASE_URL:url,LOG_LEVEL:'silent',...(accountUI?{IDENTITY_HUMAN_ADMINISTRATION_ENABLED:'true',IDENTITY_ACCOUNT_MANAGEMENT_ENABLED:'true'}:{})}));
+const runtime=await buildRuntime(loadConfig({NODE_ENV: accountUI || partialUI ? 'production' : managementUI ? 'test' : 'development',REPOSITORY_MODE:'postgres',DATABASE_URL:url,LOG_LEVEL:'silent',...(partialUI?{IDENTITY_HUMAN_CLASSIFICATION_ENABLED:'true'}:{}),...(accountUI?{IDENTITY_HUMAN_CLASSIFICATION_ENABLED:'true',IDENTITY_HUMAN_SUSPENSION_ENABLED:'true',IDENTITY_HUMAN_REACTIVATION_ENABLED:'true',IDENTITY_HUMAN_SESSION_REVOCATION_ENABLED:'true',IDENTITY_HUMAN_RETIREMENT_ENABLED:'true',IDENTITY_HUMAN_DELETION_ENABLED:'true',IDENTITY_HUMAN_BULK_ENABLED:'true',IDENTITY_EMAIL_LINKING_ENABLED:'true',IDENTITY_EMAIL_UNLINKING_ENABLED:'true',IDENTITY_PASSWORD_MANAGEMENT_ENABLED:'true'}:{})}));
 const db=new PostgresDatabase(url,false,()=>{},managementUI),control=new PostgresControlPlaneRepository(db);
 await db.query('TRUNCATE human_identities,registered_products,tenants,platform_audit_events,federated_authentication_nonces CASCADE');
 const admin=await runtime.services.register.execute({email:'console-admin@fixture.example',password:'Fixture-console-password-123!'});
@@ -44,7 +45,7 @@ if(managementUI){
  const assessmentRoutes=new Set(['/administration/platform/identity-management/inspect','/administration/platform/identity-management/lifecycle/preview']);
  app.addHook('preHandler',async request=>{if(request.method==='POST'&&assessmentRoutes.has(request.routeOptions.url??''))await refresh();});
 }
-const port=accountUI?3121:managementUI?3120:3119;
+const port=partialUI?3124:accountUI?3121:managementUI?3120:3119;
 await app.listen({host:'127.0.0.1',port});
 console.log(`Console UI fixture ready on loopback port${port} (${managementUI?'synthetic-management':'read-only'})`);
 for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{void app.close().then(()=>runtime.close()).then(()=>db.close()).then(()=>process.exit(0));});

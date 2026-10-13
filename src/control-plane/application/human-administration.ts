@@ -1,10 +1,11 @@
+import { legacyHumanCapabilities, anyHumanCapability, requireHumanCapability, requireConfirmedTest, type HumanCapabilities } from "./administrative-capabilities.js";
 import { randomUUID } from "node:crypto";
 import type { PostgresDatabase } from "../../infrastructure/postgres/database.js";
 import type { IdentityManagement } from "./identity-management.js";
 import { digest } from "./identity-management.js";
 import { continuityBlockers } from "./human-continuity.js";
 import type { SessionRepository } from "../../sessions/ports/session-repository.js";
-import type { SessionId } from "../../sessions/domain/session-id.js";
+import { SessionId } from "../../sessions/domain/session-id.js";
 import { HumanIdentityId } from "../../identity/domain/human-identity-id.js";
 import type { HumanIdentityRepository } from "../../identity/ports/human-identity-repository.js";
 import type { AdministrationPrincipals } from "./administration-principals.js";
@@ -17,7 +18,7 @@ export type AdministrativeHumanAction = "suspend" | "reactivate" | "retire" | "r
 export type HumanDeletionScope = "identity_only" | "eligible_personal_data";
 export interface HumanAdministrativeCommand {
   humanIdentityId: string; action: AdministrativeHumanAction; requestId: string;
-  reviewDigest: string; confirmation: string; scope: HumanDeletionScope;
+  reviewDigest: string; confirmation: string; scope: HumanDeletionScope; sessionReference?: string | undefined;
 }
 interface CleanupTask {
   id: string; operation_id: string; human_identity_id: string; product_id: string | null;
@@ -36,12 +37,12 @@ export class HumanAdministration {
     private readonly auditRepository: ControlPlaneRepository,
     private readonly plane: ControlPlane,
     private readonly clock: Clock,
-    readonly enabled: boolean,
+    enabled: boolean,
+    readonly capabilities: HumanCapabilities = legacyHumanCapabilities(enabled),
   ) {}
 
-  private gate() {
-    if (!this.enabled) throw new AppError("Human administration execution is disabled", "HUMAN_ADMINISTRATION_DISABLED", 403);
-  }
+  get enabled() { return anyHumanCapability(this.capabilities); }
+  private gate(action: keyof HumanCapabilities) { requireHumanCapability(this.capabilities, action); }
   private async administrator(token: SessionId, fresh = false) {
     const s = await this.sessions.findById(token), now = this.clock.now();
     if (!s || s.status !== "active" || s.expiresAt <= now || (await this.humans.findById(s.humanIdentityId))?.status !== "active") {
@@ -67,27 +68,33 @@ export class HumanAdministration {
       const deleted = await this.deleted(human);
       return {
         humanIdentityId: human, displayName: assessment.human.displayName, status: assessment.lifecycle,
-        deidentified: deleted, executionEnabled: this.enabled,
+        deidentified: deleted, executionEnabled: this.enabled, capabilities: this.capabilities, bulkAvailable: this.capabilities.bulk,
         actions: (["suspend", "reactivate", "revoke_sessions", "retire", "delete"] as const).map(action => ({
-          action,
+          action, executionEnabled: this.capabilities[action],
+          availability: !this.capabilities[action] ? "disabled" : deleted ? "unavailable_account_state" : "available_subject_to_review",
           blockers: deleted ? ["HUMAN_DEIDENTIFIED"] : action === "reactivate" ? (assessment.lifecycle === "suspended" ? [] : ["NOT_SUSPENDED"]) :
             action === "revoke_sessions" ? [] : [...continuity, ...(action !== "delete" && assessment.lifecycle === "retired" ? ["RETIRED_IS_TERMINAL"] : [])],
         })),
-        classificationAvailable: this.enabled && !deleted,
+        classificationAvailable: this.capabilities.classification && !deleted,
         providerTransferPolicy: "Requires current verified control of both accounts, a separate recovery preview and explicit confirmation; never merges data",
         auditRetention: "Canonical tombstones and minimal operation/audit references are retained; credentials and profile data are removed",
       };
     });
   }
 
-  async preview(token: SessionId, human: string, action: AdministrativeHumanAction, scope: HumanDeletionScope = "identity_only") {
+  async preview(token: SessionId, human: string, action: AdministrativeHumanAction, scope: HumanDeletionScope = "identity_only", sessionReference?: string) {
     return this.db.withTransaction(async () => {
       const actor = await this.administrator(token);
+      const confirmedTest = (await this.db.query("SELECT 1 FROM human_purposes WHERE human_identity_id=$1 AND purpose='test'", [human])).rows.length > 0;
+      const bulk = {bulkEligible: confirmedTest, bulkBlockers: confirmedTest ? [] : ["BULK_REQUIRES_CONFIRMED_TEST"], bulkExecutionEnabled: this.capabilities.bulk && this.capabilities[action]};
+      if (sessionReference !== undefined && (action !== "revoke_sessions" || !/^[a-f0-9]{64}$/u.test(sessionReference))) {
+        throw new AppError("Selected session is invalid", "INVALID_SESSION_REFERENCE", 400);
+      }
       if (action === "suspend" || action === "reactivate" || action === "retire") {
         const p = await this.management.previewLifecycle(token, [human], action);
         const account = p.accounts[0]!;
-        return { humanIdentityId: human, displayName: account.assessment.human.displayName, action, scope,
-          blockers: account.blockers, eligible: account.eligible, executionEnabled: this.enabled,
+        return { ...bulk, humanIdentityId: human, displayName: account.assessment.human.displayName, action, scope,
+          blockers: account.blockers, eligible: account.eligible, executionEnabled: this.capabilities[action],
           reviewDigest: account.assessment.reviewDigest, confirmation: `${action} ${human}`,
           consequences: [account.sessionPolicy, "Existing authentication relationships and all central/product data are retained", account.retirementPolicy],
           affectedSessions: account.affectedSessionCount, externalCleanup: [] };
@@ -110,14 +117,15 @@ export class HumanAdministration {
       const external = action === "delete" && scope === "eligible_personal_data" ? [...byProduct.values(),
         // Participation/inspector history cannot prove no unreported product data.
         ...(a.unknownCoverage ? [{ productId: null, displayName: "Unverified external data coverage", state: "unsupported_until_verified" }] : [])] : [];
-      const stable = { human, action, scope, assessment: a.reviewDigest, continuity: blockers, pendingApple, external };
+      const selected = sessionReference === undefined ? undefined : await this.selectedSession(human, sessionReference);
+      const stable = { human, action, scope, sessionReference, assessment: a.reviewDigest, continuity: blockers, pendingApple, external };
       await this.audit(actor.humanIdentityId, "human.administration.previewed", human, { action, scope });
       return {
-        humanIdentityId: human, displayName: a.human.displayName, action, scope, blockers,
-        eligible: blockers.length === 0, executionEnabled: this.enabled, reviewDigest: digest(stable),
-        confirmation: `${action} ${human}${action === "delete" ? ` ${scope}` : ""}`,
-        affectedSessions: a.nonRevokedSessionCount, externalCleanup: external,
-        consequences: action === "revoke_sessions" ? ["Revoke every central access and renewable session for this Human", "Authentication methods and all data remain; fresh sign-in is required"] : [
+        ...bulk, humanIdentityId: human, displayName: a.human.displayName, action, scope, blockers,
+        eligible: blockers.length === 0, executionEnabled: this.capabilities[action], reviewDigest: digest(stable), sessionReference,
+        confirmation: `${action} ${human}${action === "delete" ? ` ${scope}` : sessionReference ? ` session ${sessionReference}` : ""}`,
+        affectedSessions: selected ? (selected.status === "revoked" ? 0 : 1) : a.nonRevokedSessionCount, externalCleanup: external,
+        consequences: action === "revoke_sessions" ? [selected ? "Revoke only this selected GAMA session, including its renewable access" : "Revoke every central access and renewable session for this Human", "Authentication methods and all data remain; fresh sign-in is required", "External product sessions are outside this GAMA session scope"] : [
           "Revoke this Human's central sessions and remove its sign-in credentials",
           "Remove shared profile, central memberships, entitlements and personal participation references",
           "Deidentify the Human and provider relationships; retain canonical IDs, creation history and audit references",
@@ -129,10 +137,17 @@ export class HumanAdministration {
     });
   }
 
-  async execute(token: SessionId, input: HumanAdministrativeCommand) {
-    await this.administrator(token, true); this.gate();
+  private async selectedSession(human: string, reference: string) {
+    const records = (await this.db.query<{id:string;status:string}>("SELECT id,status FROM sessions WHERE human_identity_id=$1", [human])).rows;
+    const selected = records.find(record => digest(record.id) === reference);
+    if (!selected) throw new AppError("This session does not belong to the selected account", "SESSION_REFERENCE_NOT_FOUND", 404);
+    return selected;
+  }
+  async execute(token: SessionId, input: HumanAdministrativeCommand, confirmedTestOnly = false) {
+    await this.administrator(token, true); this.gate(input.action);
+    if (input.sessionReference !== undefined && input.action !== "revoke_sessions") throw new AppError("Selected session scope is valid only for revocation", "INVALID_SESSION_REFERENCE", 400);
     if (input.action === "suspend" || input.action === "reactivate" || input.action === "retire") {
-      const result = await this.management.lifecycle(token, { ...input, action: input.action, revokeSessions: input.action !== "reactivate" });
+      const result = await this.management.lifecycle(token, { ...input, action: input.action, revokeSessions: input.action !== "reactivate" }, confirmedTestOnly);
       return { ...result, reauthenticationRequired: input.action !== "reactivate" && (await this.sessions.findById(token))?.status !== "active" };
     }
     return this.db.withIdentityManagementTransaction(async () => {
@@ -145,12 +160,16 @@ export class HumanAdministration {
         }
         return input.action === "delete" ? this.deletionStatus(input.requestId) : previous.result;
       }
-      const preview = await this.preview(token, input.humanIdentityId, input.action, input.scope);
+      if (confirmedTestOnly) await requireConfirmedTest(this.db, input.humanIdentityId);
+      const preview = await this.preview(token, input.humanIdentityId, input.action, input.scope, input.sessionReference);
       if (!preview.eligible) throw new AppError("Resolve the listed continuity or provider obligations first", "ADMINISTRATION_BLOCKED", 409);
       if (preview.reviewDigest !== input.reviewDigest) throw new AppError("The account changed; refresh its consequences", "REVIEW_CHANGED", 409);
       if (input.confirmation !== preview.confirmation) throw new AppError("Confirm the exact reviewed action", "CONFIRMATION_REQUIRED", 409);
       const id = input.humanIdentityId, now = this.clock.now();
-      await this.sessions.revokeByHumanIdentityId(HumanIdentityId.from(id));
+      if (input.sessionReference !== undefined) {
+        const selected = await this.selectedSession(id, input.sessionReference);
+        await this.sessions.revoke(SessionId.from(selected.id));
+      } else await this.sessions.revokeByHumanIdentityId(HumanIdentityId.from(id));
       if (input.action === "delete") {
         // Keep tombstones for foreign-key/audit history; erase login authority.
         await this.db.query("DELETE FROM credentials WHERE human_identity_id=$1", [id]);
@@ -176,7 +195,7 @@ export class HumanAdministration {
             [randomUUID(), input.requestId, id, item.productId, item.productId === null ? "unsupported" : "pending", now]);
         }
       }
-      await this.audit(actor.humanIdentityId, input.action === "delete" ? "human.deletion.central_completed" : "human.sessions.revoked", id, { requestId: input.requestId, scope: input.scope, history: "retained" });
+      await this.audit(actor.humanIdentityId, input.action === "delete" ? "human.deletion.central_completed" : "human.sessions.revoked", id, { requestId: input.requestId, scope: input.scope, history: "retained", ...(input.sessionReference ? {sessionReference:input.sessionReference,sessionScope:"selected"} : {sessionScope:"all"}) });
       return input.action === "delete" ? this.deletionStatus(input.requestId) : result;
     });
   }
@@ -193,12 +212,12 @@ export class HumanAdministration {
     return this.db.withTransaction(async () => { await this.administrator(token); return this.deletionStatus(request); });
   }
   async bulk(token: SessionId, items: HumanAdministrativeCommand[], confirmation: string) {
-    await this.administrator(token, true); this.gate();
+    await this.administrator(token, true); this.gate("bulk");
     if (confirmation !== `review ${items.length} identities`) throw new AppError("Confirm the selected count", "CONFIRMATION_REQUIRED", 409);
     const results = [];
     for (const item of items) {
       try {
-        const result=await this.execute(token,item);
+        const result=await this.execute(token,item,true);
         const pending=(result as Record<string,unknown>).operationState === "pending_external_cleanup";
         results.push({humanIdentityId:item.humanIdentityId,state:pending?"pending_external_cleanup":"completed",result});
       }
@@ -213,7 +232,7 @@ export class HumanAdministration {
     return workload;
   }
   async claimCleanup(workloadID: string, secret: string) {
-    this.gate();
+    this.gate("delete");
     return this.db.withIdentityManagementTransaction(async () => {
       const w = await this.workload(workloadID, secret), now = this.clock.now();
       const jobs = await this.db.query<CleanupTask>(`SELECT * FROM identity_deletion_tasks WHERE product_id=$1 AND
@@ -228,7 +247,7 @@ export class HumanAdministration {
     });
   }
   async completeCleanup(workloadID: string, secret: string, input: { id: string; revision: number; state: "completed" | "unsupported" | "failed"; deletedRecords: number; retainedRecords: number }) {
-    this.gate();
+    this.gate("delete");
     return this.db.withIdentityManagementTransaction(async () => {
       const w = await this.workload(workloadID, secret), now = this.clock.now();
       const job = (await this.db.query<CleanupTask>("SELECT * FROM identity_deletion_tasks WHERE id=$1 FOR UPDATE", [input.id])).rows[0];

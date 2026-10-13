@@ -11,9 +11,9 @@ import type {HumanAdministration,HumanAdministrativeCommand,AdministrativeHumanA
 import type {FastifyInstance} from 'fastify';
 const url=process.env.POSTGRES_ACCOUNT_TEST_DATABASE_URL;
 const password='Synthetic-password-123!';
-describe('Local PostgreSQL account administration, deletion and product cleanup',{skip:!url},()=>{
+describe('Production configuration: isolated PostgreSQL account administration, deletion and product cleanup',{skip:!url},()=>{
  let runtime:ApplicationRuntime,db:PostgresDatabase,service:HumanAdministration,app:FastifyInstance;
- let admin:string,adminSession:string,target:string,targetSession:string,other:string;
+ let admin:string,adminSession:string,target:string,targetSession:string,targetRenewal:string,other:string;
  const token=()=>SessionId.from(adminSession);
  const command=async(action:AdministrativeHumanAction='delete',human=target,scope:HumanDeletionScope='identity_only'):Promise<HumanAdministrativeCommand>=>{
   const p=await service.preview(token(),human,action,scope);
@@ -27,7 +27,9 @@ describe('Local PostgreSQL account administration, deletion and product cleanup'
  };
  before(async()=>{
   assert.equal(new URL(url!).hostname,'127.0.0.1');assert.ok(new URL(url!).pathname.endsWith('_management_test'));
-  runtime=await buildRuntime(loadConfig({NODE_ENV:'test',REPOSITORY_MODE:'postgres',DATABASE_URL:url!,LOG_LEVEL:'silent',PASSWORD_HASH_MEMORY_KIB:'8192',PASSWORD_HASH_ITERATIONS:'2',IDENTITY_ACCOUNT_MANAGEMENT_ENABLED:'true',IDENTITY_HUMAN_ADMINISTRATION_ENABLED:'true',IDENTITY_PROVIDER_TRANSFER_ENABLED:'true',IDENTITY_WORKLOAD_ADMINISTRATION_ENABLED:'true'}));
+  runtime=await buildRuntime(loadConfig({NODE_ENV:'production',REPOSITORY_MODE:'postgres',DATABASE_URL:url!,LOG_LEVEL:'silent',PASSWORD_HASH_MEMORY_KIB:'8192',PASSWORD_HASH_ITERATIONS:'2',IDENTITY_EMAIL_LINKING_ENABLED:'true',IDENTITY_EMAIL_UNLINKING_ENABLED:'true',IDENTITY_PASSWORD_MANAGEMENT_ENABLED:'true',IDENTITY_HUMAN_CLASSIFICATION_ENABLED:'true',IDENTITY_HUMAN_SUSPENSION_ENABLED:'true',IDENTITY_HUMAN_REACTIVATION_ENABLED:'true',IDENTITY_HUMAN_SESSION_REVOCATION_ENABLED:'true',IDENTITY_HUMAN_RETIREMENT_ENABLED:'true',IDENTITY_HUMAN_DELETION_ENABLED:'true',IDENTITY_HUMAN_BULK_ENABLED:'true',IDENTITY_WORKLOAD_ADMINISTRATION_ENABLED:'true'}));
+  assert.equal(runtime.services.administration.identityManagement!.executionEnabled,false);
+  assert.equal(runtime.services.administration.identityManagement!.recoveryEnabled,false);
   db=new PostgresDatabase(url!,false,()=>{},true);service=runtime.services.administration.humans!;app=buildApp(runtime.services);
  });
  after(async()=>{await app?.close();await runtime?.close();await db?.close();});
@@ -36,7 +38,7 @@ describe('Local PostgreSQL account administration, deletion and product cleanup'
   const a=await runtime.services.register.execute({email:'admin@synthetic.example',password});admin=a.humanIdentityId;adminSession=a.session.sessionId;
   await db.query('UPDATE credentials SET email_verified_at=now() WHERE human_identity_id=$1',[admin]);
   await runtime.platformAdministrationProvisioning.bootstrapAdministrator(admin,'synthetic-fixture');
-  const t=await runtime.services.register.execute({email:'customer@synthetic.example',password});target=t.humanIdentityId;targetSession=t.session.sessionId;
+  const t=await runtime.services.register.execute({email:'customer@synthetic.example',password});target=t.humanIdentityId;targetSession=t.session.sessionId;targetRenewal=t.session.renewalToken;
   other=(await runtime.services.register.execute({email:'unrelated@synthetic.example',password})).humanIdentityId;
   await db.query("INSERT INTO registered_products(id,display_name,status) VALUES('synthetic-product','Synthetic','active'),('unrelated-product','Other','active')");
   await db.query("INSERT INTO tenants(id,display_name,status) VALUES('shared-business','Protected shared business','active')");
@@ -200,6 +202,7 @@ describe('Local PostgreSQL account administration, deletion and product cleanup'
   assert.equal((await service.preview(token(),target,'delete')).eligible,true);
  });
  it('bounded bulk returns individual outcomes and preserves protected accounts',async()=>{
+  await db.query("INSERT INTO human_purposes(human_identity_id,purpose,reason,actor_human_identity_id,revision,updated_at) VALUES($1,'test','Synthetic bulk review',$2,1,now())",[target,admin]);
   const items=[await command('delete',admin),await command('delete',target)];const r=await service.bulk(token(),items,'review 2 identities');
   assert.deepEqual(r.results.map(x=>x.state),['blocked','completed']);assert.equal((await db.query('SELECT status FROM human_identities WHERE id=$1',[admin])).rows[0]!.status,'active');
  });
@@ -208,4 +211,92 @@ describe('Local PostgreSQL account administration, deletion and product cleanup'
   assert.equal((await db.query('SELECT count(*)::int n FROM credentials WHERE human_identity_id=$1',[target])).rows[0]!.n,1);
   await service.execute(token(),await command('retire'));assert.equal((await db.query('SELECT status FROM human_identities WHERE id=$1',[target])).rows[0]!.status,'retired');assert.equal((await db.query('SELECT count(*)::int n FROM product_entitlements WHERE human_identity_id=$1',[target])).rows[0]!.n,1);
  });
+ it('independent classification gate restores Test to Unknown while every lifecycle and transfer gate stays off',async()=>{
+  const partial=await buildRuntime(loadConfig({NODE_ENV:'production',REPOSITORY_MODE:'postgres',DATABASE_URL:url!,LOG_LEVEL:'silent',IDENTITY_HUMAN_CLASSIFICATION_ENABLED:'true'}));
+  try {
+   const m=partial.services.administration.identityManagement!,h=partial.services.administration.humans!;
+   assert.equal(m.executionEnabled,false);assert.equal(m.recoveryEnabled,false);
+   let a=await m.inspect(token(),target);
+   await m.classify(token(),{humanIdentityId:target,purpose:'test',reason:'Synthetic explicit test designation',expectedRevision:a.classificationRevision,requestId:randomUUID()});
+   a=await m.inspect(token(),target);assert.equal(a.purpose,'test');
+   await m.classify(token(),{humanIdentityId:target,purpose:'unknown',reason:'Restore prior synthetic classification',expectedRevision:a.classificationRevision,requestId:randomUUID()});
+   assert.equal((await m.inspect(token(),target)).purpose,'unknown');
+   assert.ok((await h.available(token(),target)).actions.every(x=>x.executionEnabled===false));
+   await assert.rejects(()=>h.execute(token(),awaitCommand),(e:any)=>e.code==='HUMAN_ADMINISTRATION_DISABLED');
+   await assert.rejects(()=>m.prepareRecovery(token(),target,other),(e:any)=>e.code==='IDENTITY_MANAGEMENT_DISABLED');
+   assert.equal((await db.query('SELECT status FROM sessions WHERE id=$1',[targetSession])).rows[0]!.status,'active');
+   assert.equal((await db.query('SELECT count(*)::int n FROM product_entitlements WHERE human_identity_id=$1',[target])).rows[0]!.n,1);
+  } finally {await partial.close();}
+ });
+ it('selected-session revocation binds to one Human, preserves its other session and replays safely',async()=>{
+  const second=await runtime.services.login.execute({email:'customer@synthetic.example',password});
+  const m=runtime.services.administration.identityManagement!;
+  const {digest}=await import('../../src/control-plane/application/identity-management.js');
+  const ref=digest(targetSession),a=await m.inspect(token(),target);
+  assert.ok(a.sessions.some(x=>x.reference===ref));assert.ok(a.sessions.every(x=>x.reference.length===64 && !JSON.stringify(x).includes(targetSession)));
+  const p=await service.preview(token(),target,'revoke_sessions','identity_only',ref);
+  assert.equal(p.affectedSessions,1);
+  const c={humanIdentityId:target,action:'revoke_sessions' as const,scope:'identity_only' as const,sessionReference:ref,requestId:randomUUID(),reviewDigest:p.reviewDigest,confirmation:p.confirmation};
+  const result=await service.execute(token(),c);assert.deepEqual(await service.execute(token(),c),result);
+  assert.equal((await db.query('SELECT status FROM sessions WHERE id=$1',[targetSession])).rows[0]!.status,'revoked');
+  assert.equal((await db.query('SELECT status FROM sessions WHERE id=$1',[second.sessionId])).rows[0]!.status,'active');
+  await assert.rejects(()=>runtime.services.renewSession.execute(targetRenewal));
+  assert.equal((await db.query('SELECT status FROM sessions WHERE id=$1',[adminSession])).rows[0]!.status,'active');
+  await assert.rejects(()=>service.preview(token(),other,'revoke_sessions','identity_only',ref),(e:any)=>e.code==='SESSION_REFERENCE_NOT_FOUND');
+  await assert.rejects(()=>service.preview(token(),target,'delete','identity_only',ref),(e:any)=>e.code==='INVALID_SESSION_REFERENCE');
+  assert.equal((await app.inject({method:'GET',url:'/account',headers:{authorization:'Bearer '+targetSession}})).statusCode,401);
+  assert.equal((await app.inject({method:'GET',url:'/account',headers:{authorization:'Bearer '+second.sessionId}})).statusCode,200);
+ });
+ it('suspension denies fresh sign-in and existing access; reactivation requires fresh authentication',async()=>{
+  await service.execute(token(),await command('suspend'));
+  await assert.rejects(()=>runtime.services.renewSession.execute(targetRenewal));
+  await assert.rejects(()=>runtime.services.login.execute({email:'customer@synthetic.example',password}));
+  assert.equal((await app.inject({method:'GET',url:'/account',headers:{authorization:'Bearer '+targetSession}})).statusCode,401);
+  await service.execute(token(),await command('reactivate'));
+  await assert.rejects(()=>runtime.services.renewSession.execute(targetRenewal));
+  const fresh=await runtime.services.login.execute({email:'customer@synthetic.example',password});assert.notEqual(fresh.sessionId,targetSession);
+  assert.equal((await app.inject({method:'GET',url:'/account',headers:{authorization:'Bearer '+targetSession}})).statusCode,401);
+  assert.equal((await app.inject({method:'GET',url:'/account',headers:{authorization:'Bearer '+fresh.sessionId}})).statusCode,200);
+ });
+ it('bulk eligibility rejects Unknown individually and replay remains valid after Test metadata is deleted',async()=>{
+  const m=runtime.services.administration.identityManagement!,a=await m.inspect(token(),target);
+  await m.classify(token(),{humanIdentityId:target,purpose:'test',reason:'Synthetic batch review',expectedRevision:a.classificationRevision,requestId:randomUUID()});
+  const unknownPreview=await service.preview(token(),other,'revoke_sessions');assert.equal(unknownPreview.bulkEligible,false);
+  const items=[await command('delete',target),await command('revoke_sessions',other)];
+  const result=await service.bulk(token(),items,'review 2 identities');
+  assert.deepEqual(result.results.map(x=>x.state),['completed','blocked']);assert.equal(result.results[1]!.code,'BULK_REQUIRES_CONFIRMED_TEST');
+  const replay=await service.bulk(token(),items,'review 2 identities');assert.deepEqual(replay,result);
+ });
+ it('another business owner without a usable authentication method cannot bypass continuity',async()=>{
+  await db.query("UPDATE tenant_memberships SET tenant_role='owner' WHERE tenant_id='shared-business' AND human_identity_id=$1",[target]);
+  await db.query("UPDATE credentials SET status='retired' WHERE human_identity_id=$1",[target]);
+  await db.query("UPDATE federated_identities SET status='retired' WHERE human_identity_id=$1",[target]);
+  assert.ok((await service.preview(token(),other,'delete')).blockers.includes('SOLE_BUSINESS_OWNER'));
+ });
+
+ it('central deletion preserves a synthetic shared catalogue and 200 photographs owned by the surviving business',async()=>{
+  await db.query("CREATE TABLE synthetic_shared_assets(id integer PRIMARY KEY,tenant_id text REFERENCES tenants(id),kind text NOT NULL)");
+  try {
+   await db.query("INSERT INTO synthetic_shared_assets SELECT n,'shared-business',CASE WHEN n=0 THEN 'catalogue' ELSE 'photograph' END FROM generate_series(0,200) n");
+   const before=(await db.query('SELECT * FROM synthetic_shared_assets ORDER BY id')).rows;
+   await service.execute(token(),await command());
+   assert.deepEqual((await db.query('SELECT * FROM synthetic_shared_assets ORDER BY id')).rows,before);
+   assert.equal((await db.query("SELECT count(*)::int n FROM synthetic_shared_assets WHERE kind='photograph'")).rows[0]!.n,200);
+   assert.equal((await db.query("SELECT status FROM tenant_memberships WHERE tenant_id='shared-business' AND human_identity_id=$1",[other])).rows[0]!.status,'active');
+  } finally {await db.query('DROP TABLE synthetic_shared_assets');}
+ });
+
+ it('an explicit individual false overrides the compatibility group and configuration transitions are audited without secrets',async()=>{
+  const closedDelete=await buildRuntime(loadConfig({NODE_ENV:'production',REPOSITORY_MODE:'postgres',DATABASE_URL:url!,LOG_LEVEL:'silent',IDENTITY_HUMAN_ADMINISTRATION_ENABLED:'true',IDENTITY_HUMAN_DELETION_ENABLED:'false'}));
+  try {
+   const available=await closedDelete.services.administration.humans!.available(token(),target);
+   assert.equal(available.capabilities.delete,false);assert.equal(available.capabilities.suspend,true);
+   await assert.rejects(()=>closedDelete.services.administration.humans!.execute(token(),awaitCommand),(e:any)=>e.code==='HUMAN_ADMINISTRATION_DISABLED');
+   const receipt=(await db.query("SELECT actor_reference,event_data FROM platform_audit_events WHERE event_type='administration.capabilities.configured' ORDER BY occurred_at DESC LIMIT 1")).rows[0]!;
+   assert.equal(receipt.actor_reference,'system:runtime-configuration');
+   assert.equal(JSON.parse(receipt.event_data.capabilities).human.delete,false);
+   assert.doesNotMatch(JSON.stringify(receipt.event_data),/Synthetic-password|clientSecret|providerSubject|sessionId/);
+  } finally {await closedDelete.close();}
+ });
+
 });

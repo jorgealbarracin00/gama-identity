@@ -9,7 +9,7 @@ const human = z.string().min(1).max(200);
 const action = z.enum(["suspend", "reactivate", "retire", "revoke_sessions", "delete"]);
 const scope = z.enum(["identity_only", "eligible_personal_data"]).default("identity_only");
 const command = z.object({ humanIdentityId: human, action, scope, requestId: z.uuid(),
-  reviewDigest: z.string().regex(/^[a-f0-9]{64}$/u), confirmation: z.string().max(500) }).strict();
+  sessionReference: z.string().regex(/^[a-f0-9]{64}$/u).optional(), reviewDigest: z.string().regex(/^[a-f0-9]{64}$/u), confirmation: z.string().max(500) }).strict();
 function parse<T>(schema: z.ZodType<T>, body: unknown) {
   const result = schema.safeParse(body);
   if (!result.success) throw new AppError("Invalid administration request", "INVALID_REQUEST", 400);
@@ -32,7 +32,7 @@ export function humanAdministrationRoutes(services: IdentityServices): FastifyPl
     };
     app.post("/administration/platform/humans/manage/available", request => handle(request, (m,s) => m.available(s, parse(z.object({humanIdentityId:human}).strict(),request.body).humanIdentityId)));
     app.post("/administration/platform/humans/manage/preview", request => handle(request, (m,s) => {
-      const p=parse(z.object({humanIdentityId:human,action,scope}).strict(),request.body);return m.preview(s,p.humanIdentityId,p.action,p.scope);
+      const p=parse(z.object({humanIdentityId:human,action,scope,sessionReference:z.string().regex(/^[a-f0-9]{64}$/u).optional()}).strict(),request.body);return m.preview(s,p.humanIdentityId,p.action,p.scope,p.sessionReference);
     }));
     app.post("/administration/platform/humans/manage/execute", request => handle(request, (m,s) => m.execute(s,parse(command,request.body))));
     app.post("/administration/platform/humans/manage/status", request => handle(request, (m,s) => m.status(s,parse(z.object({requestId:z.uuid()}).strict(),request.body).requestId)));

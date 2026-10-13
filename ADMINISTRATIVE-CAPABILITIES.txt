@@ -1,0 +1,52 @@
+Production-supported administrative capability controls
+
+IDENTITY_HUMAN_CLASSIFICATION_ENABLED
+IDENTITY_HUMAN_SUSPENSION_ENABLED
+IDENTITY_HUMAN_REACTIVATION_ENABLED
+IDENTITY_HUMAN_SESSION_REVOCATION_ENABLED
+IDENTITY_HUMAN_RETIREMENT_ENABLED
+IDENTITY_HUMAN_DELETION_ENABLED
+IDENTITY_HUMAN_BULK_ENABLED
+
+Individual true/false values override IDENTITY_HUMAN_ADMINISTRATION_ENABLED.
+Absent individual values inherit the compatibility group, whose default is false.
+For independent activation keep the compatibility group explicitly false.
+Bulk requires its own flag plus each operation flag and current Test classification.
+It is bounded to 50 unique Humans and receipts. Each execution rechecks eligibility
+inside the existing exclusive administrative transaction and returns its own result.
+A completed idempotent receipt remains replayable after central metadata deletion.
+
+IDENTITY_EMAIL_LINKING_ENABLED, IDENTITY_EMAIL_UNLINKING_ENABLED and
+IDENTITY_PASSWORD_MANAGEMENT_ENABLED independently override the compatibility
+IDENTITY_ACCOUNT_MANAGEMENT_ENABLED flag. Verified Email linking also requires
+configured delivery and the host's trusted callback route. Existing native provider
+link/unlink and profile paths remain separately available, with server-side owner,
+recent authentication, proof, nonce, conflict and last-method checks unchanged.
+
+Provider transfer and managed workload provisioning remain under their existing
+separate flags. Cleanup-workload provisioning additionally requires central deletion
+availability. Turning off deletion disables cleanup claims/completions, so pause and
+review any pending cleanup before changing that flag. No test execution path is used
+by the production-supported configuration, and no migration beyond 001–018 is added.
+
+Safe startup audit receipts record effective boolean capabilities and configuration
+hashes with actor system:runtime-configuration. They contain no secrets and preserve
+transitions. New capabilities and previews do not assign purposes, lifecycle states,
+provider ownership or access to existing Humans. Every mutation still requires an
+explicit authorized decision, recent sensitive authentication and operation receipt.
+
+Selected session references are SHA-256 hashes of centrally stored session IDs;
+no bearer IDs or renewal tokens are returned. Preview binds action, Human, selected
+reference, current evidence and exact confirmation. All-session revocation remains
+supported. Revocation covers GAMA central access and renewal only; external product
+sessions and externally stored records require their own verified integrations.
+
+Central deletion deidentifies the Human, removes central sign-in credentials and
+personal references, revokes its GAMA sessions, and retains canonical tombstones and
+minimal audit/operation history. Business records, product catalogues, photographs,
+shared assets and unrelated Humans are outside the deletion allowlist. Personal
+product cleanup can be pending or unsupported and is never reported as completed
+without scoped workload receipts. Last functioning administrator, sole live owner,
+external ownership and outstanding Apple revocation obligations remain blockers.
+Executed deletion, retirement and session revocation are not undone by flag/code
+rollback. Reactivation applies only to suspended accounts and creates no old sessions.

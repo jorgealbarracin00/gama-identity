@@ -1,3 +1,4 @@
+import { anyHumanCapability, legacyHumanCapabilities, requireConfirmedTest, type HumanCapabilities, type HumanCapability } from "./administrative-capabilities.js";
 import { continuityBlockers } from "./human-continuity.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { ControlPlane } from "./control-plane.js";
@@ -90,6 +91,7 @@ export class IdentityManagement {
     private readonly requiredProducts: readonly string[] = [],
     readonly administrationEnabled = false,
     readonly recoveryEnabled = false,
+    readonly capabilities: HumanCapabilities = legacyHumanCapabilities(administrationEnabled),
   ) {}
   private gate() {
     if (!this.executionEnabled)
@@ -100,9 +102,10 @@ export class IdentityManagement {
       );
   }
   private gateRecovery() { if (!this.recoveryEnabled) this.gate(); }
-  private gateAdministrative() {
-    if (!this.administrationEnabled) this.gate();
+  private gateAdministrative(action: HumanCapability) {
+    if (!this.capabilities[action]) this.gate();
   }
+  private get administrativeMode() { return this.administrationEnabled || anyHumanCapability(this.capabilities); }
   private async owner(token: SessionId, fresh = false) {
     const s = await this.sessions.findById(token);
     const now = this.clock.now();
@@ -214,13 +217,13 @@ export class IdentityManagement {
       counts.appleRevocationReferences > 0 ||
       externalPresent;
     const sessionRows = await this.db.query<{
-      reference: string;
+      id: string;
       status: string;
       authenticatedAt: string;
       expiresAt: string;
       renewable: boolean;
     }>(
-      `SELECT left(md5(id),12) AS reference,status,authenticated_at::text AS "authenticatedAt",expires_at::text AS "expiresAt",(status<>'revoked' AND renewal_expires_at>$2 AND renewal_token_hash IS NOT NULL) AS renewable FROM sessions WHERE human_identity_id=$1 ORDER BY created_at,id LIMIT 100`,
+      `SELECT id,status,authenticated_at::text AS "authenticatedAt",expires_at::text AS "expiresAt",(status<>'revoked' AND renewal_expires_at>$2 AND renewal_token_hash IS NOT NULL) AS renewable FROM sessions WHERE human_identity_id=$1 ORDER BY created_at,id LIMIT 100`,
       [id, this.clock.now()],
     );
     // Read-only opaque references are not bearer/session IDs. Count covers all sessions even when display is bounded.
@@ -255,7 +258,7 @@ export class IdentityManagement {
       categories,
       protectedStatus: protectedIdentity ? 'blocked' : 'verified_clear',
       nonRevokedSessionCount: nonRevoked.rows[0]!.count,
-      sessions: sessionRows.rows,
+      sessions: sessionRows.rows.map(({id, ...session}) => ({...session, reference: digest(id)})),
       sessionDisplayTruncated: counts.totalSessions > 100,
       products: reports.rows,
       unknownCoverage: unknown,
@@ -283,7 +286,7 @@ export class IdentityManagement {
       reviewDigest: digest({
         ...result,
         sessions: sessionRows.rows.map((s) => ({
-          reference: s.reference,
+          reference: digest(s.id),
           status: s.status,
           authenticatedAt: s.authenticatedAt,
           expiresAt: s.expiresAt,
@@ -296,11 +299,12 @@ export class IdentityManagement {
     return this.db.withTransaction(async () => {
       const a = await this.admin(token);
       const assessment = await this.assess(id);
-      const deleted = this.administrationEnabled && (await this.db.query("SELECT 1 FROM identity_management_operations WHERE kind='human.delete' AND result->>'humanIdentityId'=$1 LIMIT 1",[id])).rows.length>0;
+      const deleted = (await this.db.query("SELECT 1 FROM identity_management_operations WHERE kind='human.delete' AND result->>'humanIdentityId'=$1 LIMIT 1",[id])).rows.length>0;
       await this.audit(a.humanIdentityId, "human.management.inspected", id);
       return {
         ...assessment,
-        executionEnabled: (this.executionEnabled || this.administrationEnabled) && !deleted,
+        executionEnabled: (this.executionEnabled || this.capabilities.classification) && !deleted,
+        capabilities: this.capabilities,
         permanentDeletionEnabled: false,
       };
     });
@@ -316,7 +320,7 @@ export class IdentityManagement {
     },
   ) {
     await this.admin(token, true);
-    this.gateAdministrative();
+    this.gateAdministrative("classification");
     return this.db.withIdentityManagementTransaction(async () => {
       const a = await this.admin(token, true);
       const intent = digest(input);
@@ -328,7 +332,7 @@ export class IdentityManagement {
       );
       if (previous) return previous;
       const m = await this.metadata(input.humanIdentityId);
-      if (this.administrationEnabled && (await this.db.query("SELECT 1 FROM identity_management_operations WHERE kind='human.delete' AND result->>'humanIdentityId'=$1 LIMIT 1",[input.humanIdentityId])).rows.length) reject("HUMAN_DEIDENTIFIED","Deleted accounts cannot be reclassified");
+      if ((await this.db.query("SELECT 1 FROM identity_management_operations WHERE kind='human.delete' AND result->>'humanIdentityId'=$1 LIMIT 1",[input.humanIdentityId])).rows.length) reject("HUMAN_DEIDENTIFIED","Deleted accounts cannot be reclassified");
       if (m.classificationRevision !== input.expectedRevision)
         reject(
           "CLASSIFICATION_CONFLICT",
@@ -408,7 +412,7 @@ export class IdentityManagement {
   private async lifecycleEligibility(id: string, action: LifecycleAction) {
     const assessment = await this.assess(id);
     const blockers: string[] = [];
-    if (this.administrationEnabled) {
+    if (this.administrativeMode) {
       if (action !== "reactivate") blockers.push(...await continuityBlockers(this.db,id));
     } else {
     if (assessment.protectedIdentity) blockers.push("PROTECTED_IDENTITY");
@@ -435,7 +439,7 @@ export class IdentityManagement {
           : "Revoke every non-revoked session belonging only to this Human",
       retirementPolicy:
         "Retirement retains all records and is terminal under the existing Human domain policy",
-      executionEnabled: this.executionEnabled || this.administrationEnabled,
+      executionEnabled: this.executionEnabled || this.capabilities[action],
     };
   }
   async previewLifecycle(
@@ -454,7 +458,8 @@ export class IdentityManagement {
       });
       return {
         accounts,
-        executionEnabled: this.executionEnabled || this.administrationEnabled,
+        executionEnabled: this.executionEnabled || this.capabilities[action],
+        bulkExecutionEnabled: this.executionEnabled || this.capabilities.bulk,
         permanentDeletionEnabled: false,
       };
     });
@@ -469,9 +474,10 @@ export class IdentityManagement {
       confirmation: string;
       revokeSessions: boolean;
     },
+    confirmedTestOnly = false,
   ) {
     await this.admin(token, true);
-    this.gateAdministrative();
+    this.gateAdministrative(input.action);
     return this.db.withIdentityManagementTransaction(async () => {
       const a = await this.admin(token, true),
         intent = digest(input);
@@ -482,6 +488,7 @@ export class IdentityManagement {
         intent,
       );
       if (prev) return prev;
+      if (confirmedTestOnly) await requireConfirmedTest(this.db, input.humanIdentityId);
       const p = await this.lifecycleEligibility(
         input.humanIdentityId,
         input.action,
@@ -532,7 +539,7 @@ export class IdentityManagement {
     items: Parameters<IdentityManagement["lifecycle"]>[1][],
     confirmation: string,
   ) {
-    this.gateAdministrative();
+    this.gateAdministrative("bulk");
     await this.admin(token, true);
     if (confirmation !== `review ${items.length} identities`)
       reject("CONFIRMATION_REQUIRED", "Confirm the selected count.");
@@ -542,7 +549,7 @@ export class IdentityManagement {
         results.push({
           humanIdentityId: item.humanIdentityId,
           state: "completed",
-          result: await this.lifecycle(token, item),
+          result: await this.lifecycle(token, item, true),
         });
       } catch (error) {
         results.push({
@@ -560,7 +567,7 @@ export class IdentityManagement {
     workloadId: string,
   ) {
     await this.admin(token, true);
-    this.gateAdministrative();
+    if (!this.administrativeMode) this.gate();
     return this.db.withIdentityManagementTransaction(async () => {
       const a = await this.admin(token, true);
       const w = await this.plane.findWorkload(workloadId);
@@ -592,7 +599,7 @@ export class IdentityManagement {
       observedAt: string;
     },
   ) {
-    this.gateAdministrative();
+    if (!this.administrativeMode) this.gate();
     return this.db.withTransaction(async () => {
       const w = await this.controlPlane.authenticateWorkload(
         workloadId,

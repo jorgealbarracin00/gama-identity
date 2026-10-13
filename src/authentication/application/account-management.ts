@@ -1,3 +1,4 @@
+import type { AccountCapabilities } from "../../control-plane/application/administrative-capabilities.js";
 import { randomUUID } from "node:crypto";
 import type { HumanIdentityRepository } from "../../identity/ports/human-identity-repository.js";
 import type { SessionRepository } from "../../sessions/ports/session-repository.js";
@@ -30,10 +31,11 @@ export class AccountManagement {
     private readonly clock: Clock,
     private readonly atomically: <T>(work: () => Promise<T>) => Promise<T>,
     readonly enabled: boolean,
+    readonly capabilities: AccountCapabilities = { appleLink: true, googleLink: true, federatedUnlink: true, profile: true, emailConnect: enabled, emailUnlink: enabled, passwordChange: enabled },
   ) {}
 
-  private gate() {
-    if (!this.enabled) throw new AppError("Account management is disabled", "ACCOUNT_MANAGEMENT_DISABLED", 403);
+  private gate(capability: keyof AccountCapabilities) {
+    if (!this.capabilities[capability]) throw new AppError("Account management is disabled", "ACCOUNT_MANAGEMENT_DISABLED", 403);
   }
 
   private async owner(token: SessionId, fresh = false) {
@@ -77,6 +79,7 @@ export class AccountManagement {
         federated: providers.filter(p => p.status === "active").map(p => ({ provider: p.provider.value, email: p.providerEmail, emailPrivate: p.providerEmailPrivate })),
         pendingEmail: pending && challenge?.consumedAt === null ? { email: pending.email.value, expiresAt: challenge.expiresAt.toISOString() } : null,
         accountManagementEnabled: this.enabled,
+        capabilities: this.capabilities,
         emailDeliveryAvailable: this.security.emailDeliveryAvailable,
         sessionPolicy: "Disconnecting revokes sessions authenticated by that method and sessions whose method is unknown",
       };
@@ -84,11 +87,11 @@ export class AccountManagement {
   }
 
   async connectEmail(token: SessionId, input: { email: string; password: string; appId?: string; ipAddress: string }) {
-    const human = await this.atomically(async () => (await this.owner(token, true)).humanIdentityId.value); this.gate();
+    const human = await this.atomically(async () => (await this.owner(token, true)).humanIdentityId.value); this.gate("emailConnect");
     const requestedEmail = NormalizedEmail.from(input.email); this.policy.validate(input.password);
     await this.security.guardRegistration(requestedEmail.value, input.ipAddress, input.appId);
     return this.atomically(async () => {
-      const owner = await this.owner(token, true); this.gate();
+      const owner = await this.owner(token, true); this.gate("emailConnect");
       if (owner.humanIdentityId.value !== human) throw new AppError("Sign in to continue", "SESSION_INVALID", 401);
       if (!this.security.emailDeliveryAvailable) throw new AppError("Email verification delivery is unavailable", "EMAIL_DELIVERY_UNAVAILABLE", 503);
       const email = NormalizedEmail.from(input.email);
@@ -120,7 +123,7 @@ export class AccountManagement {
 
   async disconnectEmail(token: SessionId) {
     return this.atomically(async () => {
-      const owner = await this.owner(token, true); this.gate();
+      const owner = await this.owner(token, true); this.gate("emailUnlink");
       const email = await this.credentials.findByHumanIdentityId(owner.humanIdentityId);
       if (!email) return { outcome: "already_unlinked", humanIdentityId: owner.humanIdentityId.value, reauthenticationRequired: false };
       if (email.status === "active" && !(await this.providers.listByHumanIdentityId(owner.humanIdentityId)).some(p => p.status === "active")) {
@@ -144,10 +147,10 @@ export class AccountManagement {
   }
 
   async changePassword(token: SessionId, currentPassword: string, password: string, ipAddress: string) {
-    const human = await this.atomically(async () => (await this.owner(token, true)).humanIdentityId.value); this.gate();
+    const human = await this.atomically(async () => (await this.owner(token, true)).humanIdentityId.value); this.gate("passwordChange");
     await this.security.guardRegistration(human + "@password-change.invalid", ipAddress);
     return this.atomically(async () => {
-      const owner = await this.owner(token, true); this.gate();
+      const owner = await this.owner(token, true); this.gate("passwordChange");
       this.policy.validate(password);
       const credential = await this.credentials.findByHumanIdentityId(owner.humanIdentityId);
       if (!credential || credential.status !== "active" || !await credential.verifyPassword(currentPassword, this.passwords)) {
