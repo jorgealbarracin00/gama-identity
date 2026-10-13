@@ -304,7 +304,7 @@ describe('Production configuration: isolated PostgreSQL account administration, 
   const {digest}=await import('../../src/control-plane/application/identity-management.js');const reference=digest(second.sessionId);
   const p=await service.preview(token(),admin,'revoke_sessions','identity_only',reference);
   const result=await service.execute(token(),{humanIdentityId:admin,action:'revoke_sessions',scope:'identity_only',sessionReference:reference,requestId:randomUUID(),reviewDigest:p.reviewDigest,confirmation:p.confirmation});
-  assert.equal(result.reauthenticationRequired,false);
+  assert.equal((result as Record<string,unknown>).reauthenticationRequired,false);
   assert.equal((await db.query('SELECT status FROM sessions WHERE id=$1',[adminSession])).rows[0]!.status,'active');
   assert.equal((await db.query('SELECT status FROM sessions WHERE id=$1',[second.sessionId])).rows[0]!.status,'revoked');
  });

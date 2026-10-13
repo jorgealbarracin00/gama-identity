@@ -50,3 +50,9 @@ without scoped workload receipts. Last functioning administrator, sole live owne
 external ownership and outstanding Apple revocation obligations remain blockers.
 Executed deletion, retirement and session revocation are not undone by flag/code
 rollback. Reactivation applies only to suspended accounts and creates no old sessions.
+
+Account capability metadata exposes public Apple/Google audiences to the authenticated
+owner so a native host can identify unsupported provider presentation before proof.
+It contains no OAuth client secrets. Configuration audit receipts retain only effective
+booleans and their digest. Provider verification still enforces the real token audience,
+issuer, signature, nonce and ownership; availability metadata never grants authority.

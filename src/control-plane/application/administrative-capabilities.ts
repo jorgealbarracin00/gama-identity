@@ -34,12 +34,13 @@ export async function requireConfirmedTest(
 
 export interface AccountCapabilities {
   appleLink: boolean; googleLink: boolean; federatedUnlink: boolean;
+  appleAudiences?: readonly string[]; googleAudiences?: readonly string[];
   emailConnect: boolean; emailUnlink: boolean; passwordChange: boolean; profile: boolean;
 }
 export function accountCapabilities(config: Config): AccountCapabilities {
   return {
-    appleLink: config.APPLE_CLIENT_IDS.length > 0,
-    googleLink: config.GOOGLE_CLIENT_IDS.length > 0,
+    appleLink: config.APPLE_CLIENT_IDS.length > 0, appleAudiences: config.APPLE_CLIENT_IDS,
+    googleLink: config.GOOGLE_CLIENT_IDS.length > 0, googleAudiences: config.GOOGLE_CLIENT_IDS,
     federatedUnlink: true, profile: true,
     emailConnect: config.IDENTITY_EMAIL_LINKING_ENABLED ?? config.IDENTITY_ACCOUNT_MANAGEMENT_ENABLED,
     emailUnlink: config.IDENTITY_EMAIL_UNLINKING_ENABLED ?? config.IDENTITY_ACCOUNT_MANAGEMENT_ENABLED,
@@ -49,7 +50,8 @@ export function accountCapabilities(config: Config): AccountCapabilities {
 
 /** One safe startup receipt per configuration transition; no credentials or provider secrets. */
 export async function recordCapabilityConfiguration(db: import("../../infrastructure/postgres/database.js").PostgresDatabase, config: Config): Promise<void> {
-  const snapshot = { human: humanCapabilities(config), account: accountCapabilities(config),
+  const { appleAudiences: _apple, googleAudiences: _google, ...account } = accountCapabilities(config);
+  const snapshot = { human: humanCapabilities(config), account,
     providerTransfer: config.IDENTITY_PROVIDER_TRANSFER_ENABLED, workloadAdministration: config.IDENTITY_WORKLOAD_ADMINISTRATION_ENABLED };
   const configurationDigest = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
   await db.withTransaction(async () => {

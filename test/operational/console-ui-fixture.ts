@@ -5,8 +5,9 @@ import {loadConfig} from '../../src/config/env.js';
 import {PostgresDatabase} from '../../src/infrastructure/postgres/database.js';
 import {PostgresControlPlaneRepository} from '../../src/infrastructure/postgres/postgres-control-plane-repository.js';
 import {consoleFixtureDatabaseAllowed} from './console-ui-fixture-safety.js';
+const staleUI=process.env.GAMA_CONSOLE_STALE_AUTH_UI_TESTING==='1';
 const partialUI=process.env.GAMA_CONSOLE_ACTIVATION_PARTIAL_UI_TESTING==='1';
-const accountUI=process.env.GAMA_CONSOLE_ACCOUNT_UI_TESTING==='1';
+const accountUI=process.env.GAMA_CONSOLE_ACCOUNT_UI_TESTING==='1'||staleUI;
 const managementUI=process.env.GAMA_CONSOLE_MANAGEMENT_UI_TESTING==='1'||accountUI;
 const url=process.env.POSTGRES_CONSOLE_UI_DATABASE_URL;
 if(!consoleFixtureDatabaseAllowed(url,managementUI)||!url)throw new Error('Local fixture database required');
@@ -45,7 +46,16 @@ if(managementUI){
  const assessmentRoutes=new Set(['/administration/platform/identity-management/inspect','/administration/platform/identity-management/lifecycle/preview']);
  app.addHook('preHandler',async request=>{if(request.method==='POST'&&assessmentRoutes.has(request.routeOptions.url??''))await refresh();});
 }
-const port=partialUI?3124:accountUI?3121:managementUI?3120:3119;
+if(staleUI){
+ let staleOnce=true;
+ app.addHook('preHandler',async request=>{
+  if(staleOnce && request.routeOptions.url==='/administration/platform/humans/manage/execute'){
+   staleOnce=false;
+   await db.query("UPDATE sessions SET authenticated_at=now()-interval '6 minutes' WHERE human_identity_id=$1 AND status='active'",[admin.humanIdentityId]);
+  }
+ });
+}
+const port=staleUI?3125:partialUI?3124:accountUI?3121:managementUI?3120:3119;
 await app.listen({host:'127.0.0.1',port});
 console.log(`Console UI fixture ready on loopback port${port} (${managementUI?'synthetic-management':'read-only'})`);
 for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,()=>{void app.close().then(()=>runtime.close()).then(()=>db.close()).then(()=>process.exit(0));});
