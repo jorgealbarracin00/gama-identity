@@ -96,7 +96,19 @@ export class HumanAdministration {
         return { ...bulk, humanIdentityId: human, displayName: account.assessment.human.displayName, action, scope,
           blockers: account.blockers, eligible: account.eligible, executionEnabled: this.capabilities[action],
           reviewDigest: account.assessment.reviewDigest, confirmation: `${action} ${human}`,
-          consequences: [account.sessionPolicy, "Existing authentication relationships and all central/product data are retained", account.retirementPolicy],
+          consequences: action === "reactivate" ? [
+            "Reactivate this suspended Human; fresh GAMA sign-in is required",
+            "No old session is restored and no authentication method or permission is added",
+            "Existing account and product records are retained",
+          ] : action === "suspend" ? [
+            "Suspend GAMA authentication and access; revoke this Human's central access and renewable sessions",
+            "Authentication methods and all data remain; external product sessions require their own verified handling",
+            "Eligible suspension can be reactivated; revoked sessions and removed permissions are not restored",
+          ] : [
+            "Retire this Human and revoke its central access and renewable sessions; fresh GAMA authentication is denied",
+            "Authentication relationships and all records remain; external product sessions are outside this GAMA scope",
+            account.retirementPolicy + "; retirement is not deletion",
+          ],
           affectedSessions: account.affectedSessionCount, externalCleanup: [] };
       }
       const a = await this.management.inspect(token, human);
@@ -125,7 +137,7 @@ export class HumanAdministration {
         eligible: blockers.length === 0, executionEnabled: this.capabilities[action], reviewDigest: digest(stable), sessionReference,
         confirmation: `${action} ${human}${action === "delete" ? ` ${scope}` : sessionReference ? ` session ${sessionReference}` : ""}`,
         affectedSessions: selected ? (selected.status === "revoked" ? 0 : 1) : a.nonRevokedSessionCount, externalCleanup: external,
-        consequences: action === "revoke_sessions" ? [selected ? "Revoke only this selected GAMA session, including its renewable access" : "Revoke every central access and renewable session for this Human", "Authentication methods and all data remain; fresh sign-in is required", "External product sessions are outside this GAMA session scope"] : [
+        consequences: action === "revoke_sessions" ? [selected ? "Revoke only this selected GAMA session, including its renewable access" : "Revoke every central access and renewable session for this Human", selected ? "Other GAMA sessions and all data remain; this revoked session needs fresh sign-in" : "Authentication methods and all data remain; fresh sign-in is required", "External product sessions are outside this GAMA session scope"] : [
           "Revoke this Human's central sessions and remove its sign-in credentials",
           "Remove shared profile, central memberships, entitlements and personal participation references",
           "Deidentify the Human and provider relationships; retain canonical IDs, creation history and audit references",
