@@ -187,7 +187,8 @@ export class HumanAdministration {
       }
       const result = { humanIdentityId: id, requestId: input.requestId, scope: input.scope,
         status: input.action === "delete" ? "deidentified" : "sessions_revoked", centralComplete: true,
-        canonicalHistoryRetained: true, reauthenticationRequired: id === actor.humanIdentityId };
+        canonicalHistoryRetained: true, sessionScope: input.sessionReference ? "selected" : "all", affectedSessions: preview.affectedSessions,
+        reauthenticationRequired: (await this.sessions.findById(token))?.status !== "active" };
       await this.db.query("INSERT INTO identity_management_operations(id,actor_human_identity_id,kind,intent_digest,result,created_at) VALUES($1,$2,$3,$4,$5,$6)", [input.requestId, actor.humanIdentityId, kind, intent, result, now]);
       if (input.action === "delete" && input.scope === "eligible_personal_data") {
         for (const item of preview.externalCleanup) {
